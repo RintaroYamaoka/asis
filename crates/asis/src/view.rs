@@ -2,6 +2,7 @@
 //! 文字の出力も TUI も、ここで作った形を描く。
 use crate::config::Project;
 use crate::github::RepoFacts;
+use crate::local::Work;
 use asis_core::facts::*;
 use asis_core::link::link_all;
 use asis_core::pr::{judge_pr, PrState, PrVerdict, Reason};
@@ -32,6 +33,16 @@ pub struct Row {
     /// なぜこの状態か
     pub why: String,
     pub prs: Vec<PrLine>,
+    /// この PC の上で、この行の作業をしている worktree
+    pub local: Vec<LocalLine>,
+}
+
+pub struct LocalLine {
+    pub path: String,
+    pub branch: String,
+    /// 開いているペインの説明(AI の名前・状態・題)。無ければ空
+    pub panes: Vec<String>,
+    pub working: bool,
 }
 
 pub struct PrLine {
@@ -68,6 +79,18 @@ impl Filter {
 }
 
 impl Row {
+    /// 手元の作業の印。AI が動いている / ペインが開いている / worktree だけある
+    pub fn local_mark(&self) -> &'static str {
+        if self.local.iter().any(|l| l.working) {
+            "▶"
+        } else if self.local.iter().any(|l| !l.panes.is_empty()) {
+            "◆"
+        } else if !self.local.is_empty() {
+            "◇"
+        } else {
+            ""
+        }
+    }
     pub fn is_mine(&self, viewer: &str) -> bool {
         self.turn.iter().any(|t| t == viewer)
     }
@@ -88,9 +111,17 @@ const ORDER: [TaskState; 5] = [
     TaskState::Todo,
 ];
 pub const LOOSE: &str = "タスクにつながっていない PR";
+pub const LOCAL: &str = "手元の作業(PR はまだ)";
 
 /// `only` が空でなければ、その人たちが出した PR と、その人たちのタスクだけを出す。
-pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> RepoView {
+/// `works` は、この repo の、この PC の上の worktree。
+pub fn build(
+    f: &RepoFacts,
+    project: &Project,
+    only: &[String],
+    works: &[Work],
+    now: i64,
+) -> RepoView {
     let wanted = |who: &str| only.is_empty() || only.iter().any(|o| o == who);
     let settings = Settings {
         members: f.people.clone(),
@@ -110,6 +141,21 @@ pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> Rep
         turn: verdicts[i].turn.clone(),
     };
 
+    // 手元の worktree を、ブランチで行に付ける。付いたものには印を付けておく。
+    let mut used = vec![false; works.len()];
+    let mut local_for = |matches: &dyn Fn(&str) -> bool| -> Vec<LocalLine> {
+        let mut out = Vec::new();
+        for (i, w) in works.iter().enumerate() {
+            if matches(&w.branch) {
+                used[i] = true;
+                out.push(local_line(w));
+            }
+        }
+        out
+    };
+    let open_branch =
+        |i: usize| (f.prs[i].lifecycle == Lifecycle::Open).then(|| f.prs[i].head_ref.as_str());
+
     let mut by_issue: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (i, refs) in links.iter().enumerate() {
         for r in refs.iter().filter(|r| r.repo == f.repo) {
@@ -128,11 +174,12 @@ pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> Rep
         let idx = by_issue.get(&issue.number).cloned().unwrap_or_default();
         let vs: Vec<PrVerdict> = idx.iter().map(|i| verdicts[*i].clone()).collect();
         let prefix = format!("{}-", issue.number);
-        let t = judge_task(
-            issue,
-            &vs,
-            f.branches.iter().any(|b| b.starts_with(&prefix)),
-        );
+        // このタスクの worktree = 番号で始まるブランチか、つながる開いた PR のブランチ。
+        let local = local_for(&|b| {
+            b.starts_with(&prefix) || idx.iter().any(|i| open_branch(*i) == Some(b))
+        });
+        let has_branch = !local.is_empty() || f.branches.iter().any(|b| b.starts_with(&prefix));
+        let t = judge_task(issue, &vs, has_branch);
         // 起票した人・担当・つながる PR の作者のどれかが当たれば出す。
         let related = wanted(&issue.author)
             || issue.assignees.iter().any(|a| wanted(a))
@@ -163,6 +210,7 @@ pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> Rep
                 task_label(t.state).to_string()
             },
             prs: idx.iter().map(|i| line(*i)).collect(),
+            local,
         });
     }
 
@@ -184,8 +232,35 @@ pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> Rep
             age: age(&f.pr_updated[i], now),
             why: why_pr(v.reason, &f.pr_failing[i]),
             prs: vec![line(i)],
+            local: local_for(&|b| open_branch(i) == Some(b)),
         });
     }
+
+    // どの行にも付かなかった worktree のうち、ペインが開いているもの(今 触っているもの)。
+    // 古い worktree が並ばないように、開いていないものは出さない。
+    let mut fresh = Vec::new();
+    for (w, _) in works.iter().zip(&used).filter(|(w, used)| {
+        !**used && !w.panes.is_empty() && !matches!(w.branch.as_str(), "main" | "master")
+    }) {
+        if !wanted(&f.viewer) {
+            break;
+        }
+        let l = local_line(w);
+        fresh.push(Row {
+            label: "手元".into(),
+            title: w.branch.clone(),
+            url: String::new(),
+            turn: vec![f.viewer.clone()],
+            age: String::new(),
+            why: "手元で作業中・まだ PR が無い".into(),
+            prs: vec![],
+            local: vec![l],
+        });
+    }
+    groups.push(Group {
+        name: LOCAL,
+        rows: fresh,
+    });
     groups.push(Group {
         name: LOOSE,
         rows: loose,
@@ -199,6 +274,26 @@ pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> Rep
             .no_deployments
             .then(|| "本番デプロイの記録が無いので、取り込みを本番として扱っています".to_string()),
         groups,
+    }
+}
+
+fn local_line(w: &Work) -> LocalLine {
+    LocalLine {
+        path: w.path.display().to_string(),
+        branch: w.branch.clone(),
+        panes: w
+            .panes
+            .iter()
+            .map(|p| {
+                [p.agent.as_str(), p.status.as_str(), p.title.as_str()]
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .collect(),
+        working: w.working(),
     }
 }
 
@@ -304,6 +399,10 @@ pub(crate) mod tests {
     }
 
     fn sample_only(only: &[&str]) -> RepoView {
+        sample_with(only, &[])
+    }
+
+    fn sample_with(only: &[&str], works: &[Work]) -> RepoView {
         let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
         let mut failing = pr(21, "ann", "fix");
         failing.checks = Checks::Failing(1);
@@ -355,7 +454,7 @@ pub(crate) mod tests {
             repos: vec!["o/r".into()],
             ..Project::default()
         };
-        build(&f, &project, &only, 1795005296)
+        build(&f, &project, &only, works, 1795005296)
     }
 
     fn rows<'a>(v: &'a RepoView, group: &str) -> Vec<&'a Row> {
@@ -446,6 +545,101 @@ pub(crate) mod tests {
         assert_eq!(labels(&sample_only(&["cat"])), vec!["#7"]);
         assert_eq!(labels(&sample_only(&["ann", "bob"])), labels(&sample()));
         assert!(labels(&sample_only(&["nobody"])).is_empty());
+    }
+
+    fn work(branch: &str, pane_status: Option<&str>) -> Work {
+        use crate::local::Pane;
+        let panes = pane_status
+            .into_iter()
+            .map(|s| Pane {
+                cwd: "/w".into(),
+                agent: "claude".into(),
+                status: s.into(),
+                title: "t".into(),
+            })
+            .collect();
+        Work {
+            repo: "o/r".into(),
+            path: format!("/w/{branch}").into(),
+            branch: branch.into(),
+            panes,
+        }
+    }
+
+    #[test]
+    fn local_work_attaches_to_tasks_and_prs() {
+        // 7-login = タスク #7 の PR のブランチ。8-wip = まだ PR の無いタスク #8。fix = つながっていない PR #21
+        let v = sample_with(
+            &[],
+            &[
+                work("7-login", Some("working")),
+                work("8-wip", None),
+                work("fix", Some("idle")),
+                work("main", Some("idle")),
+            ],
+        );
+        let row = |label: &str| {
+            v.groups
+                .iter()
+                .flat_map(|g| g.rows.iter())
+                .find(|r| r.label == label)
+                .unwrap()
+        };
+        assert_eq!(row("#7").local_mark(), "▶");
+        assert_eq!(row("#7").local[0].panes, vec!["claude working t"]);
+        assert_eq!(row("!#21").local_mark(), "◆");
+        // 手元にブランチがあるだけで、タスクは実装中になる(push する前から見える)
+        assert_eq!(
+            rows(&v, "実装中")
+                .iter()
+                .map(|r| (r.label.as_str(), r.local_mark()))
+                .collect::<Vec<_>>(),
+            vec![("#8", "◇")]
+        );
+        assert!(rows(&v, "やること").is_empty());
+        // 既定のブランチの worktree は出さない
+        assert!(rows(&v, LOCAL).is_empty());
+        assert_eq!(row("…#23").local_mark(), "");
+    }
+
+    #[test]
+    fn unlinked_local_work_is_listed_only_while_a_pane_is_open() {
+        let v = sample_with(
+            &[],
+            &[
+                work("spike", Some("working")),
+                work("old-idea", None),
+                work("99-unknown", Some("idle")),
+            ],
+        );
+        let local = rows(&v, LOCAL);
+        assert_eq!(
+            local.iter().map(|r| r.title.as_str()).collect::<Vec<_>>(),
+            vec!["spike", "99-unknown"]
+        );
+        assert_eq!(
+            (
+                local[0].label.as_str(),
+                local[0].local_mark(),
+                local[0].turn.clone()
+            ),
+            ("手元", "▶", vec!["bob".to_string()])
+        );
+        assert!(local[0].url.is_empty());
+        // ほかの人の分だけを見ているときは、自分の手元の作業は出さない
+        assert!(rows(
+            &sample_with(&["ann"], &[work("spike", Some("working"))]),
+            LOCAL
+        )
+        .is_empty());
+        assert_eq!(
+            rows(
+                &sample_with(&["bob"], &[work("spike", Some("working"))]),
+                LOCAL
+            )
+            .len(),
+            1
+        );
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub struct Project {
 pub struct Local {
     /// 見る repo。定義はその repo の `.asis.toml`
     pub watch: Vec<String>,
+    /// 手元の clone を探すフォルダ。直下にある、見ている repo の clone と、その worktree を読む
+    pub roots: Vec<String>,
     /// repo ごとの絞り込み。その人たちの分だけを出す
     pub only: BTreeMap<String, Vec<String>>,
     /// repo にファイルを置かない場合の、手元だけの定義
@@ -60,6 +62,8 @@ struct RawProject {
 struct RawLocal {
     #[serde(default)]
     watch: Vec<String>,
+    #[serde(default)]
+    roots: Vec<String>,
     #[serde(default)]
     only: BTreeMap<String, Vec<String>>,
     #[serde(default)]
@@ -127,6 +131,7 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
     raw.only.keys().try_for_each(|r| check_repo(r))?;
     Ok(Local {
         watch: raw.watch,
+        roots: raw.roots,
         only: raw.only,
         projects,
     })
@@ -334,6 +339,10 @@ deploy = ["me"]
         )
         .unwrap();
         assert_eq!(l.watch, vec!["o/a", "o/b"]);
+        assert_eq!(
+            parse_local("roots = [\"~/src\"]").unwrap().roots,
+            vec!["~/src"]
+        );
         assert_eq!(
             (l.projects[0].name.as_str(), l.projects[0].deploy.clone()),
             ("mine", vec!["me".to_string()])

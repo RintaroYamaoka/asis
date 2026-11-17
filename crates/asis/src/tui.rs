@@ -109,7 +109,10 @@ pub fn run(source: Source, filter: Filter) -> std::io::Result<()> {
                 let _ = kick.send(());
             }
             KeyCode::Enter | KeyCode::Char('o') => {
-                if let Some((row, _)) = visible(&app).get(app.cursor) {
+                if let Some((row, _)) = visible(&app)
+                    .get(app.cursor)
+                    .filter(|(row, _)| !row.url.is_empty())
+                {
                     open(&row.url);
                 }
             }
@@ -161,7 +164,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     };
     draw_list(f, list, app);
     draw_detail(f, detail, app, side);
-    let keys = "↑↓ 移動   Tab 絞り込み   Enter GitHub で開く   r 読み直す   q 終わる";
+    let keys = "↑↓ 移動   Tab 絞り込み   Enter GitHub で開く   r 読み直す   q 終わる      ▶ AI が動いている  ◆ ペインあり  ◇ worktree あり";
     f.render_widget(
         Paragraph::new(Span::styled(keys, Style::new().fg(DIM))),
         foot,
@@ -245,6 +248,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App) {
                         String::new()
                     };
                     // 題の幅 = 残り全部。右に 番・経過 を置く。
+                    let marks = format!("{marks} {}", r.local_mark()).trim().to_string();
                     let right = format!(" {marks} {turn} {:>3}", r.age);
                     let room = width.saturating_sub(4 + 8 + display_width(&right));
                     let title = pad(&clip_width(&r.title, room), room);
@@ -347,11 +351,37 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App, side: bool) {
             Style::new().fg(DIM),
         ));
     }
-    lines.push(Line::raw(""));
-    lines.push(Line::styled(
-        format!(" {}", row.url),
-        Style::new().fg(FAINT),
-    ));
+    if !row.local.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(" この PC の上の作業", Style::new().fg(DIM)));
+        for l in &row.local {
+            lines.push(Line::raw(format!(
+                " {} {}",
+                if l.working {
+                    "▶"
+                } else if l.panes.is_empty() {
+                    "◇"
+                } else {
+                    "◆"
+                },
+                l.branch
+            )));
+            lines.push(Line::styled(
+                format!("     {}", l.path),
+                Style::new().fg(DIM),
+            ));
+            for pane in &l.panes {
+                lines.push(Line::styled(format!("     {pane}"), Style::new().fg(DIM)));
+            }
+        }
+    }
+    if !row.url.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::styled(
+            format!(" {}", row.url),
+            Style::new().fg(FAINT),
+        ));
+    }
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 

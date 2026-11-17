@@ -2,6 +2,7 @@
 //! 描くだけ。判断は asis-core、事実を読むのは github、並べるのは view。
 mod config;
 mod github;
+mod local;
 mod tui;
 mod view;
 
@@ -34,6 +35,8 @@ pub struct Source {
     pub watch: Vec<String>,
     /// repo ごとの絞り込み。その人たちの分だけを出す
     pub only: std::collections::BTreeMap<String, Vec<String>>,
+    /// 手元の clone を探すフォルダ
+    pub roots: Vec<std::path::PathBuf>,
     /// 手元だけの定義
     pub local: Vec<Project>,
 }
@@ -115,6 +118,7 @@ fn run() -> Result<(), String> {
         Source {
             watch: local.watch,
             only,
+            roots: local.roots.iter().map(|r| expand_home(r)).collect(),
             local: local.projects,
         }
     } else {
@@ -123,9 +127,12 @@ fn run() -> Result<(), String> {
         } else {
             repos.iter().map(|r| (r.clone(), only.clone())).collect()
         };
+        // その場で repo を指定したときも、設定の探すフォルダは使う。
+        let roots = config::load().map(|l| l.roots).unwrap_or_default();
         Source {
             watch: repos,
             only,
+            roots: roots.iter().map(|r| expand_home(r)).collect(),
             local: vec![],
         }
     };
@@ -152,6 +159,17 @@ fn run() -> Result<(), String> {
         };
     }
     tui::run(source, filter).map_err(|e| e.to_string())
+}
+
+/// `~/src` → ホームの下の場所
+fn expand_home(path: &str) -> std::path::PathBuf {
+    match (
+        path.strip_prefix("~/"),
+        std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")),
+    ) {
+        (Some(rest), Some(home)) => std::path::PathBuf::from(home).join(rest),
+        _ => std::path::PathBuf::from(path),
+    }
 }
 
 /// 見る repo の定義を読む。定義ファイルが無ければ、その repo 1 つを既定の決まりで見る。
@@ -190,7 +208,15 @@ pub fn load(source: &Source) -> Vec<Section> {
         .map(|(repo, r)| (repo.as_str(), r.as_ref().map_err(String::clone)))
         .chain(source.local.iter().map(|p| (p.name.as_str(), Ok(p))))
         .collect();
-    // 2. 全部の repo を同時に読む。
+    // 2. この PC の上の作業(worktree・ペイン)を読む。
+    let repos: Vec<String> = projects
+        .iter()
+        .filter_map(|(_, p)| p.as_ref().ok())
+        .flat_map(|p| p.repos.iter().cloned())
+        .collect();
+    let works = local::gather(&repos, &source.roots);
+    let works = &works;
+    // 3. 全部の repo を同時に読む。
     std::thread::scope(|s| {
         let handles: Vec<_> = projects
             .into_iter()
@@ -202,12 +228,10 @@ pub fn load(source: &Source) -> Vec<Section> {
                         .map(|r| {
                             s.spawn(move || {
                                 github::fetch(r, &p.ignore_checks).map(|f| {
-                                    view::build(
-                                        &f,
-                                        p,
-                                        source.only.get(r).map(Vec::as_slice).unwrap_or(&[]),
-                                        now,
-                                    )
+                                    let only = source.only.get(r).map(Vec::as_slice).unwrap_or(&[]);
+                                    let mine: Vec<local::Work> =
+                                        works.iter().filter(|w| w.repo == *r).cloned().collect();
+                                    view::build(&f, p, only, &mine, now)
                                 })
                             })
                         })
@@ -264,8 +288,13 @@ fn plain_text(sections: &[Section], filter: Filter) -> String {
                 } else {
                     r.why.clone()
                 };
+                let local = if r.local.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {} 手元", r.local_mark())
+                };
                 out.push_str(&format!(
-                    "    {:<7} {}  [{}] {}  {prs}\n",
+                    "    {:<7} {}  [{}] {}  {prs}{local}\n",
                     r.label,
                     clip(&r.title, 46),
                     turn_text(&r.turn, &v.viewer),
