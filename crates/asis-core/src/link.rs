@@ -41,8 +41,10 @@ fn parse_ref(word: &str, repo: &str) -> Option<IssueRef> {
 }
 
 /// ブランチ名が issue の番号で始まる(`12-short-name`)。
+/// 種類を前に付ける決まりの repo に合わせて、最後の区切りの頭でも読む(`feature/12-short-name`)。
 pub fn ref_in_branch(head_ref: &str, repo: &str) -> Option<IssueRef> {
-    let (digits, rest) = head_ref.split_once('-')?;
+    let last = head_ref.rsplit('/').next()?;
+    let (digits, rest) = last.split_once('-')?;
     if rest.is_empty() || digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -134,7 +136,11 @@ mod tests {
     fn branch_prefix() {
         assert_eq!(ref_in_branch("12-add-login", "o/r"), Some(r("o/r", 12)));
         assert_eq!(ref_in_branch("12", "o/r"), None);
-        assert_eq!(ref_in_branch("feature/12-add", "o/r"), None);
+        // 種類を前に付ける決まりの repo(`feature/12-add`)でも読む。番号は最後の区切りの頭
+        assert_eq!(ref_in_branch("feature/12-add", "o/r"), Some(r("o/r", 12)));
+        assert_eq!(ref_in_branch("user/fix/7-x", "o/r"), Some(r("o/r", 7)));
+        assert_eq!(ref_in_branch("12-add/extra", "o/r"), None);
+        assert_eq!(ref_in_branch("feature/add-12", "o/r"), None);
         assert_eq!(ref_in_branch("v2-rewrite", "o/r"), None);
         assert_eq!(ref_in_branch("0-zero", "o/r"), None);
     }

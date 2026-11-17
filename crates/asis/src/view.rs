@@ -4,7 +4,7 @@ use crate::config::Project;
 use crate::github::RepoFacts;
 use crate::local::Work;
 use asis_core::facts::*;
-use asis_core::link::link_all;
+use asis_core::link::{link_all, ref_in_branch};
 use asis_core::pr::{judge_pr, PrState, PrVerdict, Reason};
 use asis_core::task::{judge_task, TaskState};
 use std::collections::BTreeMap;
@@ -157,6 +157,9 @@ pub fn build(
     let open_branch =
         |i: usize| (f.prs[i].lifecycle == Lifecycle::Open).then(|| f.prs[i].head_ref.as_str());
 
+    // タスクの行に入った PR。入らなかった PR は、つながる先を書いていても「つながっていない PR」に出す
+    // (読めていない issue を指す PR を、黙って消さない)。
+    let mut claimed = vec![false; f.prs.len()];
     let mut by_issue: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
     for (i, refs) in links.iter().enumerate() {
         for r in refs.iter().filter(|r| r.repo == f.repo) {
@@ -174,12 +177,12 @@ pub fn build(
     for issue in &f.issues {
         let idx = by_issue.get(&issue.number).cloned().unwrap_or_default();
         let vs: Vec<PrVerdict> = idx.iter().map(|i| verdicts[*i].clone()).collect();
-        let prefix = format!("{}-", issue.number);
+        // この issue の番号で始まるブランチか(規則は asis-core の link と同じ)。
+        let numbered =
+            |b: &str| ref_in_branch(b, &f.repo).is_some_and(|r| r.number == issue.number);
         // このタスクの worktree = 番号で始まるブランチか、つながる開いた PR のブランチ。
-        let local = local_for(&|b| {
-            b.starts_with(&prefix) || idx.iter().any(|i| open_branch(*i) == Some(b))
-        });
-        let has_branch = !local.is_empty() || f.branches.iter().any(|b| b.starts_with(&prefix));
+        let local = local_for(&|b| numbered(b) || idx.iter().any(|i| open_branch(*i) == Some(b)));
+        let has_branch = !local.is_empty() || f.branches.iter().any(|b| numbered(b));
         let t = judge_task(issue, &vs, has_branch);
         // 起票した人・担当・つながる PR の作者のどれかが当たれば出す。
         let related = wanted(&issue.author)
@@ -191,6 +194,7 @@ pub fn build(
         let Some(g) = ORDER.iter().position(|s| *s == t.state) else {
             continue;
         }; // 完了は出さない
+        idx.iter().for_each(|i| claimed[*i] = true);
         let newest = idx
             .iter()
             .map(|i| f.pr_updated[*i].as_str())
@@ -219,7 +223,7 @@ pub fn build(
     let mut loose = Vec::new();
     for (i, p) in f.prs.iter().enumerate() {
         let v = &verdicts[i];
-        if !links[i].is_empty()
+        if claimed[i]
             || !wanted(&p.author)
             || matches!(v.state, PrState::Shipped | PrState::Withdrawn)
         {
@@ -406,7 +410,15 @@ pub(crate) mod tests {
         sample_with(only, &[])
     }
 
+    fn sample_refs(bodies: &[(u64, &str)]) -> RepoView {
+        sample_full(&[], &[], bodies)
+    }
+
     fn sample_with(only: &[&str], works: &[Work]) -> RepoView {
+        sample_full(only, works, &[])
+    }
+
+    fn sample_full(only: &[&str], works: &[Work], bodies: &[(u64, &str)]) -> RepoView {
         let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
         let mut failing = pr(21, "ann", "fix");
         failing.checks = Checks::Failing(1);
@@ -415,7 +427,10 @@ pub(crate) mod tests {
         shipped.shipped = true;
         let mut bobs = pr(23, "bob", "x");
         bobs.is_draft = true;
-        let prs = vec![pr(20, "ann", "7-login"), failing, shipped, bobs];
+        let mut prs = vec![pr(20, "ann", "7-login"), failing, shipped, bobs];
+        for (number, body) in bodies {
+            prs.iter_mut().find(|p| p.number == *number).unwrap().body = body.to_string();
+        }
         let n = prs.len();
         let f = RepoFacts {
             repo: "o/r".into(),
@@ -514,6 +529,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_pr_pointing_at_an_unknown_issue_is_still_listed() {
+        // 読めていない issue(古く閉じたもの・別の repo のもの)を指す PR を、黙って消さない
+        let v = sample_refs(&[(21, "Refs #999"), (23, "Refs other/repo#5")]);
+        assert_eq!(
+            rows(&v, LOOSE)
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["!#21", "…#23"]
+        );
+        // 完了したタスク(#9)を指す開いた PR は、ずれとしてタスクの側に出る
+        let v = sample_refs(&[(21, "Refs #9")]);
+        let row = v
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .find(|r| r.label == "#9")
+            .unwrap();
+        assert!(row.why.contains("issue は閉じているが PR が残っている"));
+        assert_eq!(
+            rows(&v, LOOSE)
+                .iter()
+                .map(|r| r.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["…#23"]
+        );
+    }
+
+    #[test]
     fn filter_by_whose_turn() {
         let v = sample();
         let shown = |f: Filter| {
@@ -578,7 +622,7 @@ pub(crate) mod tests {
             &[],
             &[
                 work("7-login", Some("working")),
-                work("8-wip", None),
+                work("feature/8-wip", None),
                 work("fix", Some("idle")),
                 work("main", Some("idle")),
             ],
