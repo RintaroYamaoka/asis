@@ -51,9 +51,23 @@ fn main() {
     if repos.is_empty() {
         return println!("{HELP}");
     }
+    // repo ごとに同時に読み、指定された順で出す。
+    let results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = repos
+            .iter()
+            .map(|r| s.spawn(move || github::fetch(r)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err("読み込みが途中で止まりました".into()))
+            })
+            .collect()
+    });
     let mut failed = false;
-    for repo in &repos {
-        match github::fetch(repo) {
+    for result in results {
+        match result {
             Ok(f) => print!("{}", render(&f, merger, deployer, mine, now())),
             Err(e) => {
                 failed = true;

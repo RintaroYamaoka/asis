@@ -4,29 +4,39 @@ use asis_core::facts::*;
 use serde_json::Value;
 use std::process::Command;
 
-const QUERY: &str = r#"
+/// 開いている PR。状態を決めるのに要るものを全部 取る。
+const OPEN_QUERY: &str = r#"
 query($owner:String!,$name:String!){
   viewer{login}
   repository(owner:$owner,name:$name){
     nameWithOwner
-    open: pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{...P}}
-    merged: pullRequests(states:MERGED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{...P}}
+    open: pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
+      number title body isDraft state mergeable baseRefName headRefName updatedAt mergedAt
+      author{login __typename} reviewDecision
+      reviewRequests(first:10){nodes{requestedReviewer{... on User{login}}}}
+      commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}
+      closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
+      comments(last:30){nodes{author{login __typename} createdAt}}
+      reviews(last:30){nodes{author{login __typename} state submittedAt}}
+    }}
+  }
+}"#;
+
+/// それ以外。取り込み済みの PR は、テストやコメントを見ない(状態に効かない)ので取らない。
+const REST_QUERY: &str = r#"
+query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    merged: pullRequests(states:MERGED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
+      number title body state baseRefName headRefName updatedAt mergedAt author{login __typename}
+      closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
+    }}
     openIssues: issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{...I}}
     closedIssues: issues(states:CLOSED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{...I}}
     refs(refPrefix:"refs/heads/", first:100, orderBy:{field:TAG_COMMIT_DATE,direction:DESC}){nodes{name}}
     deployments(last:50){nodes{environment latestStatus{state} commit{committedDate}}}
   }
 }
-fragment I on Issue { number title state updatedAt assignees(first:5){nodes{login}} }
-fragment P on PullRequest {
-  number title body isDraft state mergeable baseRefName headRefName updatedAt mergedAt
-  author{login __typename} reviewDecision
-  reviewRequests(first:10){nodes{requestedReviewer{... on User{login}}}}
-  commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}
-  closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
-  comments(last:30){nodes{author{login __typename} createdAt}}
-  reviews(last:30){nodes{author{login __typename} state submittedAt}}
-}"#;
+fragment I on Issue { number title state updatedAt assignees(first:5){nodes{login}} }"#;
 
 pub struct RepoFacts {
     pub repo: String,
@@ -46,19 +56,38 @@ pub fn fetch(repo: &str) -> Result<RepoFacts, String> {
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| format!("`{repo}` は owner/name の形ではありません"))?;
+    // 2 本を同時に聞く。
+    let (open, rest) = std::thread::scope(|s| {
+        let rest = s.spawn(|| ask(REST_QUERY, owner, name));
+        (
+            ask(OPEN_QUERY, owner, name),
+            rest.join()
+                .unwrap_or_else(|_| Err("読み込みが途中で止まりました".into())),
+        )
+    });
+    let (mut v, rest) = (
+        open.map_err(|e| format!("{repo}: {e}"))?,
+        rest.map_err(|e| format!("{repo}: {e}"))?,
+    );
+    let missing = || format!("{repo}: リポジトリが見つからないか、読む権限がありません");
+    let target = v["data"]["repository"]
+        .as_object_mut()
+        .ok_or_else(missing)?;
+    for (k, val) in rest["data"]["repository"].as_object().ok_or_else(missing)? {
+        target.insert(k.clone(), val.clone());
+    }
+    parse(&v).ok_or_else(missing)
+}
+
+fn ask(query: &str, owner: &str, name: &str) -> Result<Value, String> {
     let out = Command::new("gh")
-        .args(["api", "graphql", "-f", &format!("query={QUERY}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}")])
+        .args(["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}")])
         .output()
         .map_err(|e| format!("gh を実行できません({e})。GitHub の公式コマンド gh を入れて `gh auth login` してください"))?;
     if !out.status.success() {
-        return Err(format!(
-            "{repo}: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let v: Value = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("{repo}: 返事を読めません({e})"))?;
-    parse(&v).ok_or_else(|| format!("{repo}: リポジトリが見つからないか、読む権限がありません"))
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("返事を読めません({e})"))
 }
 
 fn s(v: &Value) -> String {
