@@ -46,7 +46,12 @@ pub fn judge_task(issue: &IssueFacts, prs: &[PrVerdict], has_branch: bool) -> Ta
         TaskState::AwaitingShip
     };
 
-    let mut turn: Vec<String> = live.iter().flat_map(|p| p.turn.iter().cloned()).collect();
+    // PR が出ていれば PR の番。まだ無ければ、開いているタスクは担当の番。
+    let mut turn: Vec<String> = if live.is_empty() && issue.is_open {
+        issue.assignees.clone()
+    } else {
+        live.iter().flat_map(|p| p.turn.iter().cloned()).collect()
+    };
     turn.sort();
     turn.dedup();
 
@@ -86,6 +91,28 @@ mod tests {
     fn nothing_yet() {
         assert_eq!(st(true, &[], false), TaskState::Todo);
         assert_eq!(st(true, &[], true), TaskState::Doing);
+    }
+
+    #[test]
+    fn a_task_without_prs_is_the_assignees() {
+        let mut i = issue(true);
+        i.assignees = vec!["cat".into(), "ann".into()];
+        // PR がまだ無いタスクは、担当の番。担当が居なければ誰の番でもない
+        assert_eq!(judge_task(&i, &[], false).turn, vec!["ann", "cat"]);
+        assert_eq!(judge_task(&i, &[], true).turn, vec!["ann", "cat"]);
+        assert_eq!(
+            judge_task(&i, &[v(PrState::Withdrawn, &[])], false).turn,
+            vec!["ann", "cat"]
+        );
+        assert!(judge_task(&issue(true), &[], false).turn.is_empty());
+        // PR が出たら、PR の番
+        assert_eq!(
+            judge_task(&i, &[v(PrState::InReview, &["bob"])], false).turn,
+            vec!["bob"]
+        );
+        // 閉じたタスクは誰の番でもない
+        i.is_open = false;
+        assert!(judge_task(&i, &[], false).turn.is_empty());
     }
 
     #[test]
