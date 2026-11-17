@@ -14,7 +14,9 @@ query($owner:String!,$name:String!){
       number title body isDraft state mergeable baseRefName headRefName updatedAt mergedAt
       author{login __typename} reviewDecision
       reviewRequests(first:10){nodes{requestedReviewer{... on User{login}}}}
-      commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}
+      commits(last:1){nodes{commit{committedDate statusCheckRollup{contexts(first:50){nodes{
+        __typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}
+      }}}}}}
       closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
       comments(last:30){nodes{author{login __typename} createdAt}}
       reviews(last:30){nodes{author{login __typename} state submittedAt}}
@@ -44,6 +46,8 @@ pub struct RepoFacts {
     pub prs: Vec<PrFacts>,
     /// PR ごとの最後に動いた時刻(ISO 8601)。prs と同じ順
     pub pr_updated: Vec<String>,
+    /// PR ごとの、落ちているチェックの名前。prs と同じ順
+    pub pr_failing: Vec<Vec<String>>,
     pub issues: Vec<IssueFacts>,
     pub branches: Vec<String>,
     /// 本番デプロイの記録が 1 件も無い
@@ -52,7 +56,7 @@ pub struct RepoFacts {
     pub people: Vec<String>,
 }
 
-pub fn fetch(repo: &str) -> Result<RepoFacts, String> {
+pub fn fetch(repo: &str, ignore_checks: &[String]) -> Result<RepoFacts, String> {
     let (owner, name) = repo
         .split_once('/')
         .ok_or_else(|| format!("`{repo}` は owner/name の形ではありません"))?;
@@ -76,7 +80,7 @@ pub fn fetch(repo: &str) -> Result<RepoFacts, String> {
     for (k, val) in rest["data"]["repository"].as_object().ok_or_else(missing)? {
         target.insert(k.clone(), val.clone());
     }
-    parse(&v).ok_or_else(missing)
+    parse(&v, ignore_checks).ok_or_else(missing)
 }
 
 fn ask(query: &str, owner: &str, name: &str) -> Result<Value, String> {
@@ -107,7 +111,7 @@ fn is_bot(author: &Value) -> bool {
             .is_some_and(|l| l.ends_with("[bot]"))
 }
 
-pub fn parse(v: &Value) -> Option<RepoFacts> {
+pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
     let r = &v["data"]["repository"];
     let repo = r["nameWithOwner"].as_str()?.to_string();
 
@@ -128,6 +132,7 @@ pub fn parse(v: &Value) -> Option<RepoFacts> {
 
     let mut prs = Vec::new();
     let mut pr_updated = Vec::new();
+    let mut pr_failing = Vec::new();
     let mut people = Vec::new();
     for p in nodes(&r["open"]).chain(nodes(&r["merged"])) {
         let author = s(&p["author"]["login"]);
@@ -136,6 +141,7 @@ pub fn parse(v: &Value) -> Option<RepoFacts> {
         }
         let commit = &p["commits"]["nodes"][0]["commit"];
         let merged_at = p["mergedAt"].as_str();
+        let (checks, failing) = checks(&commit["statusCheckRollup"]["contexts"], ignore_checks);
         prs.push(PrFacts {
             repo: repo.clone(),
             number: p["number"].as_u64()?,
@@ -151,12 +157,7 @@ pub fn parse(v: &Value) -> Option<RepoFacts> {
             },
             is_draft: p["isDraft"] == true,
             has_conflict: p["mergeable"] == "CONFLICTING",
-            checks: match commit["statusCheckRollup"]["state"].as_str() {
-                None => Checks::None,
-                Some("SUCCESS") => Checks::Passing,
-                Some("FAILURE") | Some("ERROR") => Checks::Failing(0),
-                Some(_) => Checks::Pending,
-            },
+            checks,
             review: match p["reviewDecision"].as_str() {
                 Some("APPROVED") => Review::Approved,
                 Some("CHANGES_REQUESTED") => Review::ChangesRequested,
@@ -171,6 +172,7 @@ pub fn parse(v: &Value) -> Option<RepoFacts> {
                 .collect(),
         });
         pr_updated.push(s(&p["updatedAt"]));
+        pr_failing.push(failing);
     }
 
     let issues = nodes(&r["openIssues"])
@@ -191,11 +193,47 @@ pub fn parse(v: &Value) -> Option<RepoFacts> {
         viewer: s(&v["data"]["viewer"]["login"]),
         prs,
         pr_updated,
+        pr_failing,
         issues,
         branches: nodes(&r["refs"]).map(|n| s(&n["name"])).collect(),
         no_deployments: production.is_empty(),
         people,
     })
+}
+
+/// チェックを 1 つずつ見て、まとめる。数えないと決めた名前は外す。
+/// 落ちているものがあれば失敗、無くて動いているものがあれば実行中、全部 通っていれば成功。
+fn checks(contexts: &Value, ignore: &[String]) -> (Checks, Vec<String>) {
+    let (mut failing, mut pending, mut total) = (Vec::new(), false, 0);
+    for c in nodes(contexts) {
+        let name = c["name"]
+            .as_str()
+            .or(c["context"].as_str())
+            .unwrap_or_default();
+        if ignore.iter().any(|i| i == name) {
+            continue;
+        }
+        total += 1;
+        let is_run = c["__typename"] == "CheckRun";
+        let result = if is_run {
+            c["conclusion"].as_str()
+        } else {
+            c["state"].as_str()
+        };
+        match result {
+            _ if is_run && c["status"] != "COMPLETED" => pending = true,
+            Some("SUCCESS") | Some("NEUTRAL") | Some("SKIPPED") => {}
+            Some("PENDING") | Some("EXPECTED") => pending = true,
+            _ => failing.push(name.to_string()),
+        }
+    }
+    let state = match (total, failing.len(), pending) {
+        (0, _, _) => Checks::None,
+        (_, n, _) if n > 0 => Checks::Failing(n as u32),
+        (_, _, true) => Checks::Pending,
+        _ => Checks::Passing,
+    };
+    (state, failing)
 }
 
 /// 最後の push と作者の最後の発言のあとに、作者以外の人(bot を除く)のコメントがある。
@@ -232,7 +270,7 @@ mod tests {
             "baseRefName": "main", "headRefName": "2-x", "updatedAt": "2026-01-02T00:00:00Z", "mergedAt": null,
             "author": {"login": "ann", "__typename": "User"}, "reviewDecision": null,
             "reviewRequests": {"nodes": [{"requestedReviewer": {"login": "bob"}}, {"requestedReviewer": {}}]},
-            "commits": {"nodes": [{"commit": {"committedDate": "2026-01-01T10:00:00Z", "statusCheckRollup": {"state": "SUCCESS"}}}]},
+            "commits": {"nodes": [{"commit": {"committedDate": "2026-01-01T10:00:00Z", "statusCheckRollup": {"contexts": {"nodes": [{"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS"}]}}}}]},
             "closingIssuesReferences": {"nodes": [{"number": 2, "repository": {"nameWithOwner": "o/r"}}]},
             "comments": {"nodes": []}, "reviews": {"nodes": []}
         });
@@ -253,7 +291,7 @@ mod tests {
 
     #[test]
     fn maps_an_open_pr() {
-        let f = parse(&repo(vec![pr(json!({}))], vec![], json!([]))).unwrap();
+        let f = parse(&repo(vec![pr(json!({}))], vec![], json!([])), &[]).unwrap();
         let p = &f.prs[0];
         assert_eq!(
             (p.repo.as_str(), p.number, p.author.as_str()),
@@ -285,32 +323,79 @@ mod tests {
 
     #[test]
     fn maps_checks_review_and_conflict() {
-        let c = |state: Value| {
+        let run = |name: &str, status: &str, conclusion: Value| json!({"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion});
+        let status = |name: &str, state: &str| json!({"__typename": "StatusContext", "context": name, "state": state});
+        let c = |contexts: Value| {
             pr(
-                json!({"commits": {"nodes": [{"commit": {"committedDate": "x", "statusCheckRollup": state}}]}}),
+                json!({"commits": {"nodes": [{"commit": {"committedDate": "x", "statusCheckRollup": {"contexts": {"nodes": contexts}}}}]}}),
             )
         };
-        let f = parse(&repo(
+        let prs = vec![
+            c(json!([
+                run("test", "COMPLETED", json!("SUCCESS")),
+                run("lint", "COMPLETED", json!("FAILURE")),
+                status("preview", "ERROR")
+            ])),
+            c(json!([
+                run("test", "IN_PROGRESS", Value::Null),
+                status("preview", "SUCCESS")
+            ])),
+            c(json!([
+                run("test", "COMPLETED", json!("SKIPPED")),
+                status("preview", "PENDING")
+            ])),
+            c(json!([
+                run("test", "COMPLETED", json!("NEUTRAL")),
+                status("preview", "FAILURE")
+            ])),
+            pr(
+                json!({"commits": {"nodes": [{"commit": {"committedDate": "x", "statusCheckRollup": null}}]}}),
+            ),
+            pr(
+                json!({"reviewDecision": "CHANGES_REQUESTED", "mergeable": "CONFLICTING", "isDraft": true}),
+            ),
+            pr(json!({"reviewDecision": "APPROVED"})),
+        ];
+        let f = parse(&repo(prs.clone(), vec![], json!([])), &[]).unwrap();
+        assert_eq!(
+            f.prs.iter().take(5).map(|p| p.checks).collect::<Vec<_>>(),
             vec![
-                c(json!({"state": "FAILURE"})),
-                c(json!({"state": "PENDING"})),
-                c(Value::Null),
-                pr(json!({"reviewDecision": "CHANGES_REQUESTED", "mergeable": "CONFLICTING", "isDraft": true})),
-                pr(json!({"reviewDecision": "APPROVED"})),
-            ],
-            vec![],
-            json!([]),
-        ))
-        .unwrap();
-        assert_eq!(
-            f.prs.iter().take(3).map(|p| p.checks).collect::<Vec<_>>(),
-            vec![Checks::Failing(0), Checks::Pending, Checks::None]
+                Checks::Failing(2),
+                Checks::Pending,
+                Checks::Pending,
+                Checks::Failing(1),
+                Checks::None
+            ]
         );
+        assert_eq!(f.pr_failing[0], vec!["lint", "preview"]);
         assert_eq!(
-            (f.prs[3].review, f.prs[3].has_conflict, f.prs[3].is_draft),
+            (f.prs[5].review, f.prs[5].has_conflict, f.prs[5].is_draft),
             (Review::ChangesRequested, true, true)
         );
-        assert_eq!(f.prs[4].review, Review::Approved);
+        assert_eq!(f.prs[6].review, Review::Approved);
+
+        // 数えないと決めたチェックは外す。全部 外れたら「チェック無し」
+        let f = parse(&repo(prs, vec![], json!([])), &["preview".to_string()]).unwrap();
+        assert_eq!(
+            f.prs.iter().take(4).map(|p| p.checks).collect::<Vec<_>>(),
+            vec![
+                Checks::Failing(1),
+                Checks::Pending,
+                Checks::Passing,
+                Checks::Passing
+            ]
+        );
+        assert_eq!(f.pr_failing[0], vec!["lint"]);
+        let f = parse(
+            &repo(
+                vec![c(json!([status("preview", "FAILURE")]))],
+                vec![],
+                json!([]),
+            ),
+            &["preview".to_string()],
+        )
+        .unwrap();
+        assert_eq!(f.prs[0].checks, Checks::None);
     }
 
     #[test]
@@ -321,15 +406,18 @@ mod tests {
             {"environment": "Production", "latestStatus": {"state": "SUCCESS"}, "commit": {"committedDate": "2026-03-05T00:00:00Z"}},
             {"environment": "Production", "latestStatus": {"state": "FAILURE"}, "commit": {"committedDate": "2026-03-08T00:00:00Z"}}
         ]);
-        let f = parse(&repo(
-            vec![],
-            vec![
-                merged("2026-03-04T00:00:00Z"),
-                merged("2026-03-05T00:00:00Z"),
-                merged("2026-03-06T00:00:00Z"),
-            ],
-            deps,
-        ))
+        let f = parse(
+            &repo(
+                vec![],
+                vec![
+                    merged("2026-03-04T00:00:00Z"),
+                    merged("2026-03-05T00:00:00Z"),
+                    merged("2026-03-06T00:00:00Z"),
+                ],
+                deps,
+            ),
+            &[],
+        )
         .unwrap();
         assert_eq!(
             f.prs.iter().map(|p| p.shipped).collect::<Vec<_>>(),
@@ -341,13 +429,16 @@ mod tests {
     #[test]
     fn unanswered_comment_rules() {
         let u = |comments: Value, reviews: Value| {
-            let f = parse(&repo(
-                vec![pr(
-                    json!({"comments": {"nodes": comments}, "reviews": {"nodes": reviews}}),
-                )],
-                vec![],
-                json!([]),
-            ))
+            let f = parse(
+                &repo(
+                    vec![pr(
+                        json!({"comments": {"nodes": comments}, "reviews": {"nodes": reviews}}),
+                    )],
+                    vec![],
+                    json!([]),
+                ),
+                &[],
+            )
             .unwrap();
             f.prs[0].unanswered_comment
         };
@@ -387,6 +478,6 @@ mod tests {
 
     #[test]
     fn missing_repository_is_none() {
-        assert!(parse(&json!({"data": {"repository": null}})).is_none());
+        assert!(parse(&json!({"data": {"repository": null}}), &[]).is_none());
     }
 }

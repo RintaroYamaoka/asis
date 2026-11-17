@@ -16,13 +16,25 @@ GitHub の公式コマンド [`gh`](https://cli.github.com/) でログインし�
 
 ```
 cargo install --path crates/asis
-asis <owner/repo>...
-asis <owner/repo> --mine
+asis <owner/repo>...          # その repo を開く
+asis                          # 設定ファイルのプロジェクトを開く
+asis <owner/repo> --plain     # 画面を開かず、文字で出す
+```
+
+設定ファイルは `~/.config/asis/config.toml`(Windows は `%APPDATA%\asis\config.toml`)。
+
+```toml
+[[project]]
+name = "shop"
+repos = ["owner/front", "owner/api"]
+merger = "reviewer"          # 承認のあと取り込む人。author か reviewer(既定 author)
+deployer = "reviewer"        # 取り込みのあと本番に出す人(既定 author)
+ignore_checks = ["Preview"]  # 状態を決めるときに数えないチェックの名前
 ```
 
 ## 状態
 
-作り始めたところ。今あるのは、状態と番を決める規則と、結果を文字で出すコマンド。TUI と GUI はこれから。
+作り始めたところ。今あるのは、状態と番を決める規則と、ターミナルの画面(TUI)。手元の作業の表示と GUI はこれから。
 
 ## 開発
 

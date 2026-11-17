@@ -1,303 +1,198 @@
 //! asis — development, as is.
-//! 描くだけ。判断は asis-core、事実を読むのは github。
+//! 描くだけ。判断は asis-core、事実を読むのは github、並べるのは view。
+mod config;
 mod github;
+mod tui;
+mod view;
 
-use asis_core::facts::*;
-use asis_core::link::link_all;
-use asis_core::pr::{judge_pr, PrState, PrVerdict, Reason};
-use asis_core::task::{judge_task, TaskState};
-use std::collections::BTreeMap;
+use config::Project;
+use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
+use view::{Filter, RepoView};
 
 const HELP: &str = "asis — development, as is
 
 使い方:
-  asis <owner/repo>... [--merger author|reviewer] [--deployer author|reviewer] [--mine]
+  asis                     設定ファイルのプロジェクトを開く
+  asis <owner/repo>...     その repo を開く
 
-  --merger    承認のあと取り込む人(既定 author)
-  --deployer  取り込みのあと本番に出す人(既定 author)
-  --mine      自分の番のものだけ出す
+  --plain                  画面を開かず、文字で出す
+  --mine                   自分の番のものだけ出す
+  --merger author|reviewer    承認のあと取り込む人(既定 author)
+  --deployer author|reviewer  取り込みのあと本番に出す人(既定 author)
+  --ignore-check <名前>    状態を決めるときに数えないチェック(何度でも指定できる)
 
 GitHub の公式コマンド gh のログインを使います。何も保存しません。";
 
+/// プロジェクト名と、その repo ごとの結果
+pub struct Section {
+    pub project: String,
+    pub repos: Vec<Result<RepoView, String>>,
+}
+
 fn main() {
-    let mut repos = Vec::new();
-    let (mut merger, mut deployer, mut mine) = (Role::Author, Role::Author, false);
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "-h" | "--help" => return println!("{HELP}"),
-            "--mine" => mine = true,
-            "--merger" | "--deployer" => {
-                let role = match args.next().as_deref() {
-                    Some("author") => Role::Author,
-                    Some("reviewer") => Role::Reviewer,
-                    other => {
-                        return eprintln!(
-                            "{a} には author か reviewer を指定してください(指定: {other:?})"
-                        )
-                    }
-                };
-                if a == "--merger" {
-                    merger = role
-                } else {
-                    deployer = role
-                }
-            }
-            _ if a.starts_with('-') => return eprintln!("知らない指定です: {a}\n\n{HELP}"),
-            _ => repos.push(a),
-        }
-    }
-    if repos.is_empty() {
-        return println!("{HELP}");
-    }
-    // repo ごとに同時に読み、指定された順で出す。
-    let results: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = repos
-            .iter()
-            .map(|r| s.spawn(move || github::fetch(r)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| {
-                h.join()
-                    .unwrap_or_else(|_| Err("読み込みが途中で止まりました".into()))
-            })
-            .collect()
-    });
-    let mut failed = false;
-    for result in results {
-        match result {
-            Ok(f) => print!("{}", render(&f, merger, deployer, mine, now())),
-            Err(e) => {
-                failed = true;
-                eprintln!("{e}");
-            }
-        }
-    }
-    if failed {
+    if let Err(e) = run() {
+        eprintln!("{e}");
         std::process::exit(1);
     }
 }
 
-fn now() -> i64 {
-    SystemTime::now()
+fn run() -> Result<(), String> {
+    let mut adhoc = Project {
+        name: String::new(),
+        repos: vec![],
+        merger: asis_core::facts::Role::Author,
+        deployer: asis_core::facts::Role::Author,
+        ignore_checks: vec![],
+    };
+    let (mut plain, mut filter) = (false, Filter::All);
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        let mut value = || args.next().ok_or_else(|| format!("{a} に値がありません"));
+        match a.as_str() {
+            "-h" | "--help" => {
+                println!("{HELP}");
+                return Ok(());
+            }
+            "--plain" => plain = true,
+            "--mine" => filter = Filter::Mine,
+            "--merger" => adhoc.merger = config::role(&value()?)?,
+            "--deployer" => adhoc.deployer = config::role(&value()?)?,
+            "--ignore-check" => adhoc.ignore_checks.push(value()?),
+            _ if a.starts_with('-') => return Err(format!("知らない指定です: {a}\n\n{HELP}")),
+            _ => adhoc.repos.push(a),
+        }
+    }
+    let projects = if adhoc.repos.is_empty() {
+        config::load()?
+    } else {
+        vec![adhoc]
+    };
+    if projects.is_empty() {
+        let at = config::path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        println!("{HELP}\n\n設定ファイルがありません: {at}");
+        return Ok(());
+    }
+
+    if plain || !std::io::stdout().is_terminal() {
+        let sections = load(&projects);
+        print!("{}", plain_text(&sections, filter));
+        let failed = sections
+            .iter()
+            .flat_map(|s| &s.repos)
+            .filter_map(|r| r.as_ref().err())
+            .inspect(|e| eprintln!("{e}"))
+            .count();
+        return if failed > 0 {
+            Err(format!("{failed} 個の repo を読めませんでした"))
+        } else {
+            Ok(())
+        };
+    }
+    tui::run(projects, filter).map_err(|e| e.to_string())
+}
+
+/// 全部の repo を同時に読み、設定の順で返す。
+pub fn load(projects: &[Project]) -> Vec<Section> {
+    let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-struct Row {
-    label: String,
-    title: String,
-    prs: String,
-    note: String,
-    turn: Vec<String>,
-    age: String,
-}
-
-fn render(f: &github::RepoFacts, merger: Role, deployer: Role, mine: bool, now: i64) -> String {
-    let settings = Settings {
-        members: f.people.clone(),
-        merger,
-        deployer,
-        merged_is_shipped: f.no_deployments,
-    };
-    let verdicts: Vec<PrVerdict> = f.prs.iter().map(|p| judge_pr(p, &settings)).collect();
-    let links = link_all(&f.prs);
-
-    // タスクごとに、つながる PR の番号を集める。
-    let mut by_issue: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
-    for (i, refs) in links.iter().enumerate() {
-        for r in refs.iter().filter(|r| r.repo == f.repo) {
-            by_issue.entry(r.number).or_default().push(i);
-        }
-    }
-
-    let order = [
-        TaskState::InReview,
-        TaskState::AwaitingShip,
-        TaskState::ShippedOpen,
-        TaskState::Doing,
-        TaskState::Todo,
-    ];
-    let mut groups: Vec<(String, Vec<Row>)> = order
-        .iter()
-        .map(|s| (task_label(*s).to_string(), vec![]))
-        .collect();
-    for issue in &f.issues {
-        let idx = by_issue.get(&issue.number).cloned().unwrap_or_default();
-        let vs: Vec<PrVerdict> = idx.iter().map(|i| verdicts[*i].clone()).collect();
-        let prefix = format!("{}-", issue.number);
-        let has_branch = f.branches.iter().any(|b| b.starts_with(&prefix));
-        let t = judge_task(issue, &vs, has_branch);
-        let Some(g) = order.iter().position(|s| *s == t.state) else {
-            continue;
-        }; // 完了は出さない
-        let newest = idx
+        .unwrap_or(0);
+    std::thread::scope(|s| {
+        let handles: Vec<Vec<_>> = projects
             .iter()
-            .map(|i| f.pr_updated[*i].as_str())
-            .max()
-            .unwrap_or("");
-        groups[g].1.push(Row {
-            label: format!("#{}", issue.number),
-            title: issue.title.clone(),
-            prs: idx
-                .iter()
-                .map(|i| format!("{}#{}", mark(verdicts[*i].state), f.prs[*i].number))
-                .collect::<Vec<_>>()
-                .join(" "),
-            note: if t.mismatch {
-                "issue は閉じているが PR が残っている".into()
-            } else {
-                String::new()
-            },
-            turn: t.turn,
-            age: age(newest, now),
-        });
-    }
-
-    // タスクにつながっていない PR。本番に出たもの・取り下げたものは出さない。
-    let mut loose = Vec::new();
-    for (i, p) in f.prs.iter().enumerate() {
-        let v = &verdicts[i];
-        if !links[i].is_empty() || matches!(v.state, PrState::Shipped | PrState::Withdrawn) {
-            continue;
-        }
-        loose.push(Row {
-            label: format!("{}#{}", mark(v.state), p.number),
-            title: p.title.clone(),
-            prs: String::new(),
-            note: reason_text(v.reason),
-            turn: v.turn.clone(),
-            age: age(&f.pr_updated[i], now),
-        });
-    }
-    groups.push(("タスクにつながっていない PR".to_string(), loose));
-
-    let mut out = format!("\n{}\n", f.repo);
-    if f.no_deployments {
-        out.push_str("  (本番デプロイの記録が無いので、取り込みを本番として扱っています)\n");
-    }
-    let mut shown = 0;
-    for (name, rows) in groups {
-        let rows: Vec<&Row> = rows
-            .iter()
-            .filter(|r| !mine || r.turn.contains(&f.viewer))
+            .map(|p| {
+                p.repos
+                    .iter()
+                    .map(|r| {
+                        s.spawn(move || {
+                            github::fetch(r, &p.ignore_checks).map(|f| view::build(&f, p, now))
+                        })
+                    })
+                    .collect()
+            })
             .collect();
-        if rows.is_empty() {
-            continue;
+        projects
+            .iter()
+            .zip(handles)
+            .map(|(p, hs)| Section {
+                project: p.name.clone(),
+                repos: hs
+                    .into_iter()
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("読み込みが途中で止まりました".into()))
+                    })
+                    .collect(),
+            })
+            .collect()
+    })
+}
+
+fn plain_text(sections: &[Section], filter: Filter) -> String {
+    let mut out = String::new();
+    for v in sections.iter().flat_map(|s| &s.repos).flatten() {
+        out.push_str(&format!("\n{}\n", v.repo));
+        if let Some(note) = &v.note {
+            out.push_str(&format!("  ({note})\n"));
         }
-        out.push_str(&format!("\n  {name}  {}\n", rows.len()));
-        for r in rows {
-            shown += 1;
-            let turn = match r.turn.as_slice() {
-                [] => "-".to_string(),
-                t if t.contains(&f.viewer) => "あなたの番".to_string(),
-                t => t.join(","),
-            };
-            let extra = [r.prs.as_str(), r.note.as_str()]
+        let mut shown = 0;
+        for g in &v.groups {
+            let rows: Vec<_> = g
+                .rows
                 .iter()
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("  ");
-            out.push_str(&format!(
-                "    {:<7} {}  [{turn}] {}  {extra}\n",
-                r.label,
-                clip(&r.title, 46),
-                r.age
-            ));
+                .filter(|r| r.shows(filter, &v.viewer))
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            out.push_str(&format!("\n  {}  {}\n", g.name, rows.len()));
+            for r in rows {
+                shown += 1;
+                let prs = if r.label.starts_with('#') {
+                    r.prs
+                        .iter()
+                        .map(|p| format!("{}#{}", p.mark, p.number))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                } else {
+                    r.why.clone()
+                };
+                out.push_str(&format!(
+                    "    {:<7} {}  [{}] {}  {prs}\n",
+                    r.label,
+                    clip(&r.title, 46),
+                    turn_text(&r.turn, &v.viewer),
+                    r.age
+                ));
+            }
         }
-    }
-    if shown == 0 {
-        out.push_str(if mine {
-            "\n  あなたの番のものはありません\n"
-        } else {
-            "\n  動いているものはありません\n"
-        });
+        if shown == 0 {
+            out.push_str(if filter == Filter::Mine {
+                "\n  あなたの番のものはありません\n"
+            } else {
+                "\n  動いているものはありません\n"
+            });
+        }
     }
     out
 }
 
-fn task_label(s: TaskState) -> &'static str {
-    match s {
-        TaskState::Todo => "やること",
-        TaskState::Doing => "実装中",
-        TaskState::InReview => "確認待ち",
-        TaskState::AwaitingShip => "本番待ち",
-        TaskState::ShippedOpen => "本番に出た・閉じていない",
-        TaskState::Done => "完了",
+pub fn turn_text(turn: &[String], viewer: &str) -> String {
+    match turn {
+        [] => "-".to_string(),
+        t if t.iter().any(|x| x == viewer) => "あなたの番".to_string(),
+        t => t.join(","),
     }
 }
 
-fn mark(s: PrState) -> &'static str {
-    match s {
-        PrState::Shipped => "✓",
-        PrState::Merged => "↑",
-        PrState::Withdrawn => "×",
-        PrState::Draft => "…",
-        PrState::NeedsFix => "!",
-        PrState::Testing => "~",
-        PrState::ReadyToMerge => "+",
-        PrState::InReview => "?",
-    }
-}
-
-fn reason_text(r: Reason) -> String {
-    match r {
-        Reason::Shipped => "本番に出た",
-        Reason::MergedNotShipped => "取り込み済み・まだ本番に出ていない",
-        Reason::Withdrawn => "取り下げ",
-        Reason::Draft => "下書き",
-        Reason::Conflict => "取り込み先とぶつかっている",
-        Reason::ChecksFailing(_) => "テストが落ちている",
-        Reason::ChangesRequested => "直しを頼まれている",
-        Reason::UnansweredComment => "返していないコメントがある",
-        Reason::ChecksRunning => "テストが動いている",
-        Reason::Approved => "承認済み・取り込み待ち",
-        Reason::AwaitingReview => "確認待ち",
-    }
-    .to_string()
-}
-
-fn clip(s: &str, max: usize) -> String {
+pub fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }
-    s.chars().take(max - 1).chain(['…']).collect()
-}
-
-/// `2026-01-02T03:04:05Z` からの経過。読めなければ空。
-fn age(iso: &str, now: i64) -> String {
-    let Some(t) = epoch(iso) else {
-        return String::new();
-    };
-    let d = (now - t).max(0);
-    match d {
-        0..=3599 => format!("{}m", d / 60),
-        3600..=86399 => format!("{}h", d / 3600),
-        _ => format!("{}d", d / 86400),
-    }
-}
-
-fn epoch(iso: &str) -> Option<i64> {
-    let n = |a: usize, b: usize| iso.get(a..b)?.parse::<i64>().ok();
-    let (y, m, d, h, mi, s) = (
-        n(0, 4)?,
-        n(5, 7)?,
-        n(8, 10)?,
-        n(11, 13)?,
-        n(14, 16)?,
-        n(17, 19)?,
-    );
-    // 暦の日付 → 1970-01-01 からの日数
-    let y2 = if m <= 2 { y - 1 } else { y };
-    let era = y2.div_euclid(400);
-    let yoe = y2 - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let days = era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
-    Some(days * 86400 + h * 3600 + mi * 60 + s)
+    s.chars().take(max.saturating_sub(1)).chain(['…']).collect()
 }
 
 #[cfg(test)]
@@ -305,21 +200,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn epoch_and_age() {
-        assert_eq!(epoch("1970-01-01T00:00:00Z"), Some(0));
-        assert_eq!(epoch("2000-03-01T00:00:00Z"), Some(951868800));
-        assert_eq!(epoch("2026-11-18T12:34:56Z"), Some(1795005296));
-        assert_eq!(epoch("nope"), None);
-        let now = 1795005296;
-        assert_eq!(age("2026-11-18T12:04:56Z", now), "30m");
-        assert_eq!(age("2026-11-18T07:34:56Z", now), "5h");
-        assert_eq!(age("2026-11-15T12:34:56Z", now), "3d");
-        assert_eq!(age("", now), "");
-    }
-
-    #[test]
     fn clip_keeps_short_and_cuts_long() {
         assert_eq!(clip("abc", 5), "abc");
         assert_eq!(clip("あいうえおか", 5), "あいうえ…");
+    }
+
+    #[test]
+    fn plain_text_lists_groups_and_respects_the_filter() {
+        let sections = vec![Section {
+            project: "p".into(),
+            repos: vec![Ok(view::tests::sample()), Err("x".into())],
+        }];
+        let all = plain_text(&sections, Filter::All);
+        assert!(all.contains("o/r\n"));
+        assert!(all.contains("確認待ち  1"));
+        assert!(all.contains("#7      login  [あなたの番] 5h  ?#20"));
+        assert!(all.contains("!#21    pr 21  [ann] 5h  チェックが落ちている(lint)"));
+        let mine = plain_text(&sections, Filter::Mine);
+        assert!(mine.contains("#7 ") && !mine.contains("#21") && !mine.contains("#8"));
+    }
+
+    #[test]
+    fn turn_text_forms() {
+        assert_eq!(turn_text(&[], "me"), "-");
+        assert_eq!(turn_text(&["a".into(), "me".into()], "me"), "あなたの番");
+        assert_eq!(turn_text(&["a".into(), "b".into()], "me"), "a,b");
     }
 }
