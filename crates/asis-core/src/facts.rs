@@ -59,6 +59,8 @@ pub struct IssueFacts {
     pub number: u64,
     pub title: String,
     pub is_open: bool,
+    /// 起票した人
+    pub author: String,
     pub assignees: Vec<String>,
 }
 

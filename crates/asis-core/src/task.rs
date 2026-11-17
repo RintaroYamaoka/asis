@@ -67,6 +67,7 @@ mod tests {
             number: 12,
             title: "t".into(),
             is_open: open,
+            author: String::new(),
             assignees: vec![],
         }
     }

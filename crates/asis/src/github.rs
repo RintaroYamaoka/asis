@@ -38,7 +38,7 @@ query($owner:String!,$name:String!){
     deployments(last:50){nodes{environment latestStatus{state} commit{committedDate}}}
   }
 }
-fragment I on Issue { number title state updatedAt assignees(first:5){nodes{login}} }"#;
+fragment I on Issue { number title state updatedAt author{login} assignees(first:5){nodes{login}} }"#;
 
 /// repo の既定のブランチにある定義ファイルの中身。置かれていなければ None。
 pub fn project_file(repo: &str) -> Result<Option<String>, String> {
@@ -202,6 +202,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
                 number: i["number"].as_u64()?,
                 title: s(&i["title"]),
                 is_open: i["state"] == "OPEN",
+                author: s(&i["author"]["login"]),
                 assignees: nodes(&i["assignees"]).map(|a| s(&a["login"])).collect(),
             })
         })
@@ -301,7 +302,7 @@ mod tests {
     fn repo(open: Vec<Value>, merged: Vec<Value>, deployments: Value) -> Value {
         json!({"data": {"viewer": {"login": "bob"}, "repository": {
             "nameWithOwner": "o/r", "open": {"nodes": open}, "merged": {"nodes": merged},
-            "openIssues": {"nodes": [{"number": 2, "title": "i", "state": "OPEN", "assignees": {"nodes": [{"login": "ann"}]}}]},
+            "openIssues": {"nodes": [{"number": 2, "title": "i", "state": "OPEN", "author": {"login": "cat"}, "assignees": {"nodes": [{"login": "ann"}]}}]},
             "closedIssues": {"nodes": [{"number": 1, "title": "old", "state": "CLOSED", "assignees": {"nodes": []}}]},
             "refs": {"nodes": [{"name": "main"}, {"name": "3-wip"}]},
             "deployments": {"nodes": deployments}
@@ -336,6 +337,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(2, true), (1, false)]
         );
+        assert_eq!(f.issues[0].author, "cat");
         assert!(f.no_deployments);
         assert_eq!(f.people, vec!["ann"]);
     }

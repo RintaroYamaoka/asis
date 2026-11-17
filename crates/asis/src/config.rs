@@ -3,6 +3,7 @@
 //! プロジェクトの定義(まとめる repo・役割・数えないチェック)は、repo の中の `.asis.toml` に置く。
 //! 置いた repo を見られる人は、同じ定義を読む。手元の設定には「どの repo を見るか」だけを持つ。
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// repo の中に置く定義ファイルの名前
@@ -25,6 +26,8 @@ pub struct Project {
 pub struct Local {
     /// 見る repo。定義はその repo の `.asis.toml`
     pub watch: Vec<String>,
+    /// repo ごとの絞り込み。その人たちの分だけを出す
+    pub only: BTreeMap<String, Vec<String>>,
     /// repo にファイルを置かない場合の、手元だけの定義
     pub projects: Vec<Project>,
 }
@@ -57,6 +60,8 @@ struct RawProject {
 struct RawLocal {
     #[serde(default)]
     watch: Vec<String>,
+    #[serde(default)]
+    only: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     project: Vec<RawProject>,
 }
@@ -119,8 +124,10 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
         .into_iter()
         .map(|p| project(p, None))
         .collect::<Result<_, _>>()?;
+    raw.only.keys().try_for_each(|r| check_repo(r))?;
     Ok(Local {
         watch: raw.watch,
+        only: raw.only,
         projects,
     })
 }
@@ -180,8 +187,57 @@ pub fn with_watch(text: &str, watch: &[String]) -> Result<String, String> {
     })
 }
 
-/// 見る repo を足す・外す。結果の一覧を返す。
-pub fn edit_watch(repo: &str, add: bool) -> Result<Vec<String>, String> {
+/// `[only]` の表の、その repo の行だけを書き換えた中身を返す。`people` が空なら行を消す。
+pub fn with_only(text: &str, repo: &str, people: &[String]) -> String {
+    let key = format!("\"{repo}\"");
+    let is_entry = |line: &str| {
+        line.trim_start()
+            .strip_prefix(&key)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+    };
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|l| !is_entry(l))
+        .map(str::to_string)
+        .collect();
+    if !people.is_empty() {
+        let entry = format!(
+            "{key} = [{}]",
+            people
+                .iter()
+                .map(|p| format!("\"{p}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        match lines.iter().position(|l| l.trim() == "[only]") {
+            Some(at) => lines.insert(at + 1, entry),
+            None => {
+                // 表の見出しは、ほかの表より前に置く(`watch` の行のすぐ後)。
+                let at = lines
+                    .iter()
+                    .position(|l| l.trim_start().starts_with('['))
+                    .unwrap_or(lines.len());
+                lines.splice(
+                    at..at,
+                    [String::new(), "[only]".to_string(), entry, String::new()],
+                );
+            }
+        }
+    }
+    // 中身が無くなった表の見出しは消す。
+    if let Some(at) = lines.iter().position(|l| l.trim() == "[only]") {
+        let next = lines[at + 1..].iter().find(|l| !l.trim().is_empty());
+        if next.is_none_or(|l| l.trim_start().starts_with('[')) {
+            lines.remove(at);
+        }
+    }
+    let mut out = lines.join("\n").trim_end().to_string();
+    out.push('\n');
+    out
+}
+
+/// 見る repo を足す・外す。足すときは、その repo で誰の分を出すか(空なら全部)も書く。結果を返す。
+pub fn edit_watch(repo: &str, add: bool, only: &[String]) -> Result<Local, String> {
     check_repo(repo)?;
     let path = path().ok_or("設定ファイルの置き場が分かりません(HOME がありません)")?;
     let text = read(&path)?;
@@ -192,12 +248,19 @@ pub fn edit_watch(repo: &str, add: bool) -> Result<Vec<String>, String> {
     if add {
         watch.push(repo.to_string());
     }
-    let next = with_watch(&text, &watch)?;
+    let next = with_only(
+        &with_watch(&text, &watch)?,
+        repo,
+        if add { only } else { &[] },
+    );
+    let local = parse_local(&next).map_err(|e| {
+        format!("書き換えた設定を読めません({e})。設定ファイルを手で直してください")
+    })?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     std::fs::write(&path, next).map_err(|e| format!("{}: {e}", path.display()))?;
-    Ok(watch)
+    Ok(local)
 }
 
 /// repo に置く定義ファイルのひな形
@@ -276,6 +339,37 @@ deploy = ["me"]
             ("mine", vec!["me".to_string()])
         );
         assert_eq!(parse_local("").unwrap(), Local::default());
+    }
+
+    #[test]
+    fn only_table_is_read_and_rewritten() {
+        let w = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let l =
+            parse_local("watch = [\"o/a\"]\n\n[only]\n\"o/a\" = [\"alice\", \"bob\"]\n").unwrap();
+        assert_eq!(l.only.get("o/a"), Some(&w(&["alice", "bob"])));
+
+        // 表が無ければ作る。手元の定義より前に置く
+        let text = "watch = [\"o/a\"]\n[[project]]\nname = \"x\"\nrepos = [\"o/r\"]\n";
+        let next = with_only(text, "o/a", &w(&["alice"]));
+        let l = parse_local(&next).unwrap();
+        assert_eq!(
+            (l.only.get("o/a"), l.projects.len()),
+            (Some(&w(&["alice"])), 1)
+        );
+        // 2 つ目を足す・1 つ目を書き換える・消す
+        let next = with_only(&next, "o/b", &w(&["bob"]));
+        let next = with_only(&next, "o/a", &w(&["cat"]));
+        let l = parse_local(&next).unwrap();
+        assert_eq!(
+            (l.only.get("o/a"), l.only.get("o/b")),
+            (Some(&w(&["cat"])), Some(&w(&["bob"])))
+        );
+        let next = with_only(&with_only(&next, "o/a", &[]), "o/b", &[]);
+        let l = parse_local(&next).unwrap();
+        assert!(l.only.is_empty());
+        assert!(!next.contains("[only]"), "{next}");
+        assert_eq!((l.watch, l.projects.len()), (w(&["o/a"]), 1));
+        assert!(parse_local("[only]\nnope = [\"x\"]").is_err());
     }
 
     #[test]

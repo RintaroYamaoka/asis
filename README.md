@@ -18,6 +18,7 @@ GitHub の公式コマンド [`gh`](https://cli.github.com/) でログインし�
 cargo install --path crates/asis
 asis <owner/repo>...          # その repo を開く
 asis add <owner/repo>         # 見る repo に足す。以後は asis だけで開く
+asis add <owner/repo> --only alice,bob   # その repo では、その人たちの分だけ出す
 asis --plain                  # 画面を開かず、文字で出す
 ```
 

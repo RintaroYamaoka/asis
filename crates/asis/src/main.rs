@@ -15,12 +15,13 @@ const HELP: &str = "asis — development, as is
 使い方:
   asis                     見ると決めた repo を開く
   asis <owner/repo>...     その repo を開く
-  asis add <owner/repo>    見る repo に足す
+  asis add <owner/repo>    見る repo に足す(--only を付けると、その人の分だけ出す)
   asis remove <owner/repo> 見る repo から外す
   asis init                repo に置く定義ファイル(.asis.toml)のひな形を出す
 
   --plain                  画面を開かず、文字で出す
   --mine                   自分の番のものだけ出す
+  --only <名前,名前>       その人たちが出した PR と、その人たちのタスクだけ出す
 
 プロジェクトの定義(まとめる repo・役割・数えないチェック)は、repo の中の .asis.toml に置きます。
 その repo を見られる人は、同じ定義を読みます。置かなければ、その repo 1 つを既定の決まりで見ます。
@@ -31,6 +32,8 @@ GitHub の公式コマンド gh のログインを使います。読んだもの
 pub struct Source {
     /// 定義を repo の中のファイルから読む repo
     pub watch: Vec<String>,
+    /// repo ごとの絞り込み。その人たちの分だけを出す
+    pub only: std::collections::BTreeMap<String, Vec<String>>,
     /// 手元だけの定義
     pub local: Vec<Project>,
 }
@@ -50,8 +53,9 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let mut repos = Vec::new();
-    let (mut plain, mut filter) = (false, Filter::All);
-    for a in std::env::args().skip(1) {
+    let (mut plain, mut filter, mut only) = (false, Filter::All, Vec::new());
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
                 println!("{HELP}");
@@ -59,6 +63,16 @@ fn run() -> Result<(), String> {
             }
             "--plain" => plain = true,
             "--mine" => filter = Filter::Mine,
+            "--only" => {
+                let names = args.next().ok_or("--only に名前がありません")?;
+                only.extend(
+                    names
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(str::to_string),
+                );
+            }
             _ if a.starts_with('-') => return Err(format!("知らない指定です: {a}\n\n{HELP}")),
             _ => repos.push(a),
         }
@@ -72,28 +86,46 @@ fn run() -> Result<(), String> {
             let [_, repo] = repos.as_slice() else {
                 return Err(format!("asis {cmd} <owner/repo> の形で指定してください"));
             };
-            let watch = config::edit_watch(repo, cmd == "add")?;
-            println!(
-                "見る repo: {}",
-                if watch.is_empty() {
-                    "(なし)".to_string()
-                } else {
-                    watch.join(", ")
+            let local = config::edit_watch(repo, cmd == "add", &only)?;
+            if local.watch.is_empty() {
+                println!("見る repo はありません");
+            }
+            for r in &local.watch {
+                match local.only.get(r) {
+                    Some(people) => println!("{r}  ({} の分だけ)", people.join("・")),
+                    None => println!("{r}"),
                 }
-            );
+            }
             return Ok(());
         }
         _ => {}
     }
     let source = if repos.is_empty() {
         let local = config::load()?;
+        // その場の --only は、設定の絞り込みより優先して全部の repo に当てる。
+        let only = if only.is_empty() {
+            local.only
+        } else {
+            local
+                .watch
+                .iter()
+                .map(|r| (r.clone(), only.clone()))
+                .collect()
+        };
         Source {
             watch: local.watch,
+            only,
             local: local.projects,
         }
     } else {
+        let only = if only.is_empty() {
+            Default::default()
+        } else {
+            repos.iter().map(|r| (r.clone(), only.clone())).collect()
+        };
         Source {
             watch: repos,
+            only,
             local: vec![],
         }
     };
@@ -169,7 +201,14 @@ pub fn load(source: &Source) -> Vec<Section> {
                         .iter()
                         .map(|r| {
                             s.spawn(move || {
-                                github::fetch(r, &p.ignore_checks).map(|f| view::build(&f, p, now))
+                                github::fetch(r, &p.ignore_checks).map(|f| {
+                                    view::build(
+                                        &f,
+                                        p,
+                                        source.only.get(r).map(Vec::as_slice).unwrap_or(&[]),
+                                        now,
+                                    )
+                                })
                             })
                         })
                         .collect::<Vec<_>>(),
@@ -199,7 +238,7 @@ pub fn load(source: &Source) -> Vec<Section> {
 fn plain_text(sections: &[Section], filter: Filter) -> String {
     let mut out = String::new();
     for v in sections.iter().flat_map(|s| &s.repos).flatten() {
-        out.push_str(&format!("\n{}\n", v.repo));
+        out.push_str(&format!("\n{}{}\n", v.repo, only_text(&v.only)));
         if let Some(note) = &v.note {
             out.push_str(&format!("  ({note})\n"));
         }
@@ -245,6 +284,15 @@ fn plain_text(sections: &[Section], filter: Filter) -> String {
     out
 }
 
+/// 絞り込んでいることを、repo の名前の横に出す。
+pub fn only_text(only: &[String]) -> String {
+    if only.is_empty() {
+        String::new()
+    } else {
+        format!("  ({} の分だけ)", only.join("・"))
+    }
+}
+
 pub fn turn_text(turn: &[String], viewer: &str) -> String {
     match turn {
         [] => "-".to_string(),
@@ -278,6 +326,8 @@ mod tests {
         }];
         let all = plain_text(&sections, Filter::All);
         assert!(all.contains("o/r\n"));
+        assert_eq!(only_text(&[]), "");
+        assert_eq!(only_text(&["a".into(), "b".into()]), "  (a・b の分だけ)");
         assert!(all.contains("確認待ち  1"));
         assert!(all.contains("#7      login  [あなたの番] 5h  ?#20"));
         assert!(all.contains("!#21    pr 21  [ann] 5h  チェックが落ちている(lint)"));

@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 pub struct RepoView {
     pub repo: String,
     pub viewer: String,
+    /// この人たちの分だけを出している。空なら全部
+    pub only: Vec<String>,
     pub note: Option<String>,
     pub groups: Vec<Group>,
 }
@@ -87,7 +89,9 @@ const ORDER: [TaskState; 5] = [
 ];
 pub const LOOSE: &str = "タスクにつながっていない PR";
 
-pub fn build(f: &RepoFacts, project: &Project, now: i64) -> RepoView {
+/// `only` が空でなければ、その人たちが出した PR と、その人たちのタスクだけを出す。
+pub fn build(f: &RepoFacts, project: &Project, only: &[String], now: i64) -> RepoView {
+    let wanted = |who: &str| only.is_empty() || only.iter().any(|o| o == who);
     let settings = Settings {
         members: f.people.clone(),
         review: project.review.clone(),
@@ -129,6 +133,13 @@ pub fn build(f: &RepoFacts, project: &Project, now: i64) -> RepoView {
             &vs,
             f.branches.iter().any(|b| b.starts_with(&prefix)),
         );
+        // 起票した人・担当・つながる PR の作者のどれかが当たれば出す。
+        let related = wanted(&issue.author)
+            || issue.assignees.iter().any(|a| wanted(a))
+            || idx.iter().any(|i| wanted(&f.prs[*i].author));
+        if !related {
+            continue;
+        }
         let Some(g) = ORDER.iter().position(|s| *s == t.state) else {
             continue;
         }; // 完了は出さない
@@ -159,7 +170,10 @@ pub fn build(f: &RepoFacts, project: &Project, now: i64) -> RepoView {
     let mut loose = Vec::new();
     for (i, p) in f.prs.iter().enumerate() {
         let v = &verdicts[i];
-        if !links[i].is_empty() || matches!(v.state, PrState::Shipped | PrState::Withdrawn) {
+        if !links[i].is_empty()
+            || !wanted(&p.author)
+            || matches!(v.state, PrState::Shipped | PrState::Withdrawn)
+        {
             continue;
         }
         loose.push(Row {
@@ -180,6 +194,7 @@ pub fn build(f: &RepoFacts, project: &Project, now: i64) -> RepoView {
     RepoView {
         repo: f.repo.clone(),
         viewer: f.viewer.clone(),
+        only: only.to_vec(),
         note: f
             .no_deployments
             .then(|| "本番デプロイの記録が無いので、取り込みを本番として扱っています".to_string()),
@@ -285,6 +300,11 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn sample() -> RepoView {
+        sample_only(&[])
+    }
+
+    fn sample_only(only: &[&str]) -> RepoView {
+        let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
         let mut failing = pr(21, "ann", "fix");
         failing.checks = Checks::Failing(1);
         let mut shipped = pr(22, "ann", "old");
@@ -306,6 +326,7 @@ pub(crate) mod tests {
                     number: 7,
                     title: "login".into(),
                     is_open: true,
+                    author: "cat".into(),
                     assignees: vec![],
                 },
                 IssueFacts {
@@ -313,6 +334,7 @@ pub(crate) mod tests {
                     number: 8,
                     title: "later".into(),
                     is_open: true,
+                    author: "bob".into(),
                     assignees: vec![],
                 },
                 IssueFacts {
@@ -320,6 +342,7 @@ pub(crate) mod tests {
                     number: 9,
                     title: "old".into(),
                     is_open: false,
+                    author: "ann".into(),
                     assignees: vec![],
                 },
             ],
@@ -332,7 +355,7 @@ pub(crate) mod tests {
             repos: vec!["o/r".into()],
             ..Project::default()
         };
-        build(&f, &project, 1795005296)
+        build(&f, &project, &only, 1795005296)
     }
 
     fn rows<'a>(v: &'a RepoView, group: &str) -> Vec<&'a Row> {
@@ -402,6 +425,27 @@ pub(crate) mod tests {
         // 誰の番でもないもの(#8)は、相手の番にも出ない
         assert_eq!(shown(Filter::Others), vec!["!#21"]);
         assert_eq!(Filter::All.next().next().next(), Filter::All);
+    }
+
+    #[test]
+    fn only_shows_the_named_peoples_work() {
+        let labels = |v: &RepoView| {
+            v.groups
+                .iter()
+                .flat_map(|g| g.rows.iter())
+                .map(|r| r.label.clone())
+                .collect::<Vec<_>>()
+        };
+        // ann の PR(#20 は タスク #7 につながる・#21 はつながらない)。bob の下書き #23 と bob のタスク #8 は出ない
+        let v = sample_only(&["ann"]);
+        assert_eq!(labels(&v), vec!["#7", "!#21"]);
+        assert_eq!(v.only, vec!["ann"]);
+        // bob が起票したタスク #8 と、bob の PR
+        assert_eq!(labels(&sample_only(&["bob"])), vec!["#8", "…#23"]);
+        // cat は PR を出していないが、タスク #7 を起票している
+        assert_eq!(labels(&sample_only(&["cat"])), vec!["#7"]);
+        assert_eq!(labels(&sample_only(&["ann", "bob"])), labels(&sample()));
+        assert!(labels(&sample_only(&["nobody"])).is_empty());
     }
 
     #[test]

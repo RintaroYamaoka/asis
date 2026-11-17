@@ -1,6 +1,6 @@
 //! ターミナルの画面。描くことと、キーを受けることだけ。判断は持たない。
 use crate::view::{Filter, Row};
-use crate::{clip, load, turn_text, Section, Source};
+use crate::{clip, load, only_text, turn_text, Section, Source};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -214,10 +214,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 format!("{}  {}", section.project, v.repo)
             };
-            lines.push(Line::styled(
-                title,
-                Style::new().add_modifier(Modifier::BOLD),
-            ));
+            lines.push(Line::from(vec![
+                Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
+                Span::styled(only_text(&v.only), Style::new().fg(DIM)),
+            ]));
             if let Some(note) = &v.note {
                 lines.push(Line::styled(format!("  {note}"), Style::new().fg(FAINT)));
             }
