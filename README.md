@@ -37,6 +37,12 @@ merge = ["alice"]                # 承認のあと取り込む人(省くと作�
 deploy = ["alice"]               # 本番に出す人(省くと作者)
 ```
 
+## AI に渡す決まり
+
+PR がどの issue の仕事かは、2 つの書き方から読む。ブランチ名を issue の番号で始める(`12-short-name`)。PR の本文に `Closes #12` か `Refs #12` を書く。
+
+この 2 つを AI が守るための手順書が [skill/asis/SKILL.md](skill/asis/SKILL.md) にある。Claude Code なら、このフォルダを `~/.claude/skills/asis` に置く。以後、「#12 を始めて」「今の話を issue にして」で効く。
+
 ## 手元の作業
 
 この PC の上の worktree とターミナルのペインを読み、どのタスク・どの PR を触っているかを一覧に重ねる(▶ AI が動いている / ◆ ペインあり / ◇ worktree あり)。PR になる前の作業も見える。
