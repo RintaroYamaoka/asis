@@ -90,8 +90,9 @@ pub const LOOSE: &str = "タスクにつながっていない PR";
 pub fn build(f: &RepoFacts, project: &Project, now: i64) -> RepoView {
     let settings = Settings {
         members: f.people.clone(),
-        merger: project.merger,
-        deployer: project.deployer,
+        review: project.review.clone(),
+        merge: project.merge.clone(),
+        deploy: project.deploy.clone(),
         merged_is_shipped: f.no_deployments,
     };
     let verdicts: Vec<PrVerdict> = f.prs.iter().map(|p| judge_pr(p, &settings)).collect();
@@ -329,9 +330,7 @@ pub(crate) mod tests {
         let project = Project {
             name: "p".into(),
             repos: vec!["o/r".into()],
-            merger: Role::Author,
-            deployer: Role::Author,
-            ignore_checks: vec![],
+            ..Project::default()
         };
         build(&f, &project, 1795005296)
     }

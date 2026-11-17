@@ -1,7 +1,6 @@
 //! ターミナルの画面。描くことと、キーを受けることだけ。判断は持たない。
-use crate::config::Project;
 use crate::view::{Filter, Row};
-use crate::{clip, load, turn_text, Section};
+use crate::{clip, load, turn_text, Section, Source};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -52,12 +51,12 @@ fn count(app: &App, filter: Filter) -> usize {
         .sum()
 }
 
-pub fn run(projects: Vec<Project>, filter: Filter) -> std::io::Result<()> {
+pub fn run(source: Source, filter: Filter) -> std::io::Result<()> {
     // 読み込みは別の流れで回す。画面は止めない。
     let (tx, rx) = mpsc::channel::<Vec<Section>>();
     let (kick, kicked) = mpsc::channel::<()>();
     std::thread::spawn(move || loop {
-        if tx.send(load(&projects)).is_err() {
+        if tx.send(load(&source)).is_err() {
             break;
         }
         if let Err(mpsc::RecvTimeoutError::Disconnected) = kicked.recv_timeout(REFRESH) {

@@ -13,16 +13,27 @@ use view::{Filter, RepoView};
 const HELP: &str = "asis — development, as is
 
 使い方:
-  asis                     設定ファイルのプロジェクトを開く
+  asis                     見ると決めた repo を開く
   asis <owner/repo>...     その repo を開く
+  asis add <owner/repo>    見る repo に足す
+  asis remove <owner/repo> 見る repo から外す
+  asis init                repo に置く定義ファイル(.asis.toml)のひな形を出す
 
   --plain                  画面を開かず、文字で出す
   --mine                   自分の番のものだけ出す
-  --merger author|reviewer    承認のあと取り込む人(既定 author)
-  --deployer author|reviewer  取り込みのあと本番に出す人(既定 author)
-  --ignore-check <名前>    状態を決めるときに数えないチェック(何度でも指定できる)
 
-GitHub の公式コマンド gh のログインを使います。何も保存しません。";
+プロジェクトの定義(まとめる repo・役割・数えないチェック)は、repo の中の .asis.toml に置きます。
+その repo を見られる人は、同じ定義を読みます。置かなければ、その repo 1 つを既定の決まりで見ます。
+
+GitHub の公式コマンド gh のログインを使います。読んだものは保存しません。";
+
+/// 何を見るか。読み直すたびに、定義ファイルも読み直す。
+pub struct Source {
+    /// 定義を repo の中のファイルから読む repo
+    pub watch: Vec<String>,
+    /// 手元だけの定義
+    pub local: Vec<Project>,
+}
 
 /// プロジェクト名と、その repo ごとの結果
 pub struct Section {
@@ -38,17 +49,9 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
-    let mut adhoc = Project {
-        name: String::new(),
-        repos: vec![],
-        merger: asis_core::facts::Role::Author,
-        deployer: asis_core::facts::Role::Author,
-        ignore_checks: vec![],
-    };
+    let mut repos = Vec::new();
     let (mut plain, mut filter) = (false, Filter::All);
-    let mut args = std::env::args().skip(1);
-    while let Some(a) = args.next() {
-        let mut value = || args.next().ok_or_else(|| format!("{a} に値がありません"));
+    for a in std::env::args().skip(1) {
         match a.as_str() {
             "-h" | "--help" => {
                 println!("{HELP}");
@@ -56,28 +59,53 @@ fn run() -> Result<(), String> {
             }
             "--plain" => plain = true,
             "--mine" => filter = Filter::Mine,
-            "--merger" => adhoc.merger = config::role(&value()?)?,
-            "--deployer" => adhoc.deployer = config::role(&value()?)?,
-            "--ignore-check" => adhoc.ignore_checks.push(value()?),
             _ if a.starts_with('-') => return Err(format!("知らない指定です: {a}\n\n{HELP}")),
-            _ => adhoc.repos.push(a),
+            _ => repos.push(a),
         }
     }
-    let projects = if adhoc.repos.is_empty() {
-        config::load()?
+    match repos.first().map(String::as_str) {
+        Some("init") => {
+            print!("{}", config::TEMPLATE);
+            return Ok(());
+        }
+        Some(cmd @ ("add" | "remove")) => {
+            let [_, repo] = repos.as_slice() else {
+                return Err(format!("asis {cmd} <owner/repo> の形で指定してください"));
+            };
+            let watch = config::edit_watch(repo, cmd == "add")?;
+            println!(
+                "見る repo: {}",
+                if watch.is_empty() {
+                    "(なし)".to_string()
+                } else {
+                    watch.join(", ")
+                }
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+    let source = if repos.is_empty() {
+        let local = config::load()?;
+        Source {
+            watch: local.watch,
+            local: local.projects,
+        }
     } else {
-        vec![adhoc]
+        Source {
+            watch: repos,
+            local: vec![],
+        }
     };
-    if projects.is_empty() {
-        let at = config::path()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        println!("{HELP}\n\n設定ファイルがありません: {at}");
+    if source.watch.is_empty() && source.local.is_empty() {
+        println!(
+            "{HELP}\n\nまだ見る repo がありません。`asis add <owner/repo>` で足してください。"
+        );
         return Ok(());
     }
 
     if plain || !std::io::stdout().is_terminal() {
-        let sections = load(&projects);
+        let sections = load(&source);
         print!("{}", plain_text(&sections, filter));
         let failed = sections
             .iter()
@@ -91,41 +119,78 @@ fn run() -> Result<(), String> {
             Ok(())
         };
     }
-    tui::run(projects, filter).map_err(|e| e.to_string())
+    tui::run(source, filter).map_err(|e| e.to_string())
 }
 
-/// 全部の repo を同時に読み、設定の順で返す。
-pub fn load(projects: &[Project]) -> Vec<Section> {
+/// 見る repo の定義を読む。定義ファイルが無ければ、その repo 1 つを既定の決まりで見る。
+fn resolve(repo: &str) -> Result<Project, String> {
+    match github::project_file(repo)? {
+        Some(text) => config::parse_repo_file(&text, repo)
+            .map_err(|e| format!("{repo} の {}: {e}", config::REPO_FILE)),
+        None => Ok(config::single(repo)),
+    }
+}
+
+/// 定義を読み、全部の repo を同時に読み、指定の順で返す。
+pub fn load(source: &Source) -> Vec<Section> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    std::thread::scope(|s| {
-        let handles: Vec<Vec<_>> = projects
+    let stopped = || "読み込みが途中で止まりました".to_string();
+    // 1. 見る repo の定義を同時に読む。
+    let resolved: Vec<Result<Project, String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = source
+            .watch
             .iter()
-            .map(|p| {
-                p.repos
-                    .iter()
-                    .map(|r| {
-                        s.spawn(move || {
-                            github::fetch(r, &p.ignore_checks).map(|f| view::build(&f, p, now))
+            .map(|r| s.spawn(move || resolve(r)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
+            .collect()
+    });
+    // 定義を読めなかった repo は、その名前で理由を出す。
+    let projects: Vec<(&str, Result<&Project, String>)> = source
+        .watch
+        .iter()
+        .zip(&resolved)
+        .map(|(repo, r)| (repo.as_str(), r.as_ref().map_err(String::clone)))
+        .chain(source.local.iter().map(|p| (p.name.as_str(), Ok(p))))
+        .collect();
+    // 2. 全部の repo を同時に読む。
+    std::thread::scope(|s| {
+        let handles: Vec<_> = projects
+            .into_iter()
+            .map(|(label, p)| match p {
+                Ok(p) => Ok((
+                    p,
+                    p.repos
+                        .iter()
+                        .map(|r| {
+                            s.spawn(move || {
+                                github::fetch(r, &p.ignore_checks).map(|f| view::build(&f, p, now))
+                            })
                         })
-                    })
-                    .collect()
+                        .collect::<Vec<_>>(),
+                )),
+                Err(e) => Err((label, e)),
             })
             .collect();
-        projects
-            .iter()
-            .zip(handles)
-            .map(|(p, hs)| Section {
-                project: p.name.clone(),
-                repos: hs
-                    .into_iter()
-                    .map(|h| {
-                        h.join()
-                            .unwrap_or_else(|_| Err("読み込みが途中で止まりました".into()))
-                    })
-                    .collect(),
+        handles
+            .into_iter()
+            .map(|h| match h {
+                Ok((p, hs)) => Section {
+                    project: p.name.clone(),
+                    repos: hs
+                        .into_iter()
+                        .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
+                        .collect(),
+                },
+                Err((label, e)) => Section {
+                    project: label.to_string(),
+                    repos: vec![Err(e)],
+                },
             })
             .collect()
     })

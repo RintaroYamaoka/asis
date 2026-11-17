@@ -17,20 +17,26 @@ GitHub の公式コマンド [`gh`](https://cli.github.com/) でログインし�
 ```
 cargo install --path crates/asis
 asis <owner/repo>...          # その repo を開く
-asis                          # 設定ファイルのプロジェクトを開く
-asis <owner/repo> --plain     # 画面を開かず、文字で出す
+asis add <owner/repo>         # 見る repo に足す。以後は asis だけで開く
+asis --plain                  # 画面を開かず、文字で出す
 ```
 
-設定ファイルは `~/.config/asis/config.toml`(Windows は `%APPDATA%\asis\config.toml`)。
+## プロジェクトの定義
+
+まとめる repo・役割・数えないチェックは、repo の中の `.asis.toml` に置く。その repo を見られる人は、同じ定義を読む。ひな形は `asis init` で出る。置かなければ、その repo 1 つを既定の決まりで見る。
 
 ```toml
-[[project]]
 name = "shop"
-repos = ["owner/front", "owner/api"]
-merger = "reviewer"          # 承認のあと取り込む人。author か reviewer(既定 author)
-deployer = "reviewer"        # 取り込みのあと本番に出す人(既定 author)
-ignore_checks = ["Preview"]  # 状態を決めるときに数えないチェックの名前
+repos = ["owner/api"]            # この repo と一緒に見る repo
+ignore_checks = ["Preview"]      # 状態を決めるときに数えないチェック
+
+[roles]                          # GitHub のアカウント名か "author"(PR を出した本人)
+review = ["alice"]               # 確認する人
+merge = ["alice"]                # 承認のあと取り込む人(省くと作者)
+deploy = ["alice"]               # 本番に出す人(省くと作者)
 ```
+
+メンバーを招待する機能は無い。GitHub で repo の権限を渡し、相手が `asis add owner/repo` と打てば、同じ画面が出る。
 
 ## 状態
 

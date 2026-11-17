@@ -40,6 +40,25 @@ query($owner:String!,$name:String!){
 }
 fragment I on Issue { number title state updatedAt assignees(first:5){nodes{login}} }"#;
 
+/// repo の既定のブランチにある定義ファイルの中身。置かれていなければ None。
+pub fn project_file(repo: &str) -> Result<Option<String>, String> {
+    let (owner, name) = repo
+        .split_once('/')
+        .ok_or_else(|| format!("`{repo}` は owner/name の形ではありません"))?;
+    let query = format!(
+        r#"query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{object(expression:"HEAD:{}"){{... on Blob{{text}}}}}}}}"#,
+        crate::config::REPO_FILE
+    );
+    let v = ask(&query, owner, name).map_err(|e| format!("{repo}: {e}"))?;
+    let repository = &v["data"]["repository"];
+    if repository.is_null() {
+        return Err(format!(
+            "{repo}: リポジトリが見つからないか、読む権限がありません"
+        ));
+    }
+    Ok(repository["object"]["text"].as_str().map(str::to_string))
+}
+
 pub struct RepoFacts {
     pub repo: String,
     pub viewer: String,

@@ -62,17 +62,20 @@ pub struct IssueFacts {
     pub assignees: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    Author,
-    Reviewer,
-}
+/// 役割の欄に書ける特別な名前。その PR を出した本人を指す。
+pub const AUTHOR: &str = "author";
 
-#[derive(Debug, Clone)]
+/// プロジェクトの決まり。役割は GitHub のアカウント名か [`AUTHOR`] の一覧で、空なら既定。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
+    /// その repo で動いている人
     pub members: Vec<String>,
-    pub merger: Role,
-    pub deployer: Role,
+    /// 確認する人。空なら、作者以外のメンバー
+    pub review: Vec<String>,
+    /// 承認のあと取り込む人。空なら作者
+    pub merge: Vec<String>,
+    /// 取り込みのあと本番に出す人。空なら作者
+    pub deploy: Vec<String>,
     /// デプロイの記録が無いプロジェクトで、取り込みを本番として扱う
     pub merged_is_shipped: bool,
 }

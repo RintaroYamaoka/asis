@@ -38,17 +38,13 @@ pub struct PrVerdict {
 
 pub fn judge_pr(pr: &PrFacts, s: &Settings) -> PrVerdict {
     let author = || vec![pr.author.clone()];
-    let by_role = |role: Role| match role {
-        Role::Author => author(),
-        Role::Reviewer => reviewers(pr, s),
-    };
     let (state, turn, reason) = match pr.lifecycle {
         Lifecycle::Merged if pr.shipped || s.merged_is_shipped => {
             (PrState::Shipped, vec![], Reason::Shipped)
         }
         Lifecycle::Merged => (
             PrState::Merged,
-            by_role(s.deployer),
+            named(&s.deploy, pr),
             Reason::MergedNotShipped,
         ),
         Lifecycle::Closed => (PrState::Withdrawn, vec![], Reason::Withdrawn),
@@ -66,7 +62,7 @@ pub fn judge_pr(pr: &PrFacts, s: &Settings) -> PrVerdict {
             } else if pr.checks == Checks::Pending {
                 (PrState::Testing, vec![], Reason::ChecksRunning)
             } else if pr.review == Review::Approved {
-                (PrState::ReadyToMerge, by_role(s.merger), Reason::Approved)
+                (PrState::ReadyToMerge, named(&s.merge, pr), Reason::Approved)
             } else {
                 (PrState::InReview, reviewers(pr, s), Reason::AwaitingReview)
             }
@@ -79,21 +75,42 @@ pub fn judge_pr(pr: &PrFacts, s: &Settings) -> PrVerdict {
     }
 }
 
-/// 確認する人。頼まれた人 → 作者以外のメンバー → 作者(1 人のプロジェクト)。
+/// 役割の欄を、その PR での人の一覧にする。空なら作者。`author` は作者に読み替える。
+fn named(role: &[String], pr: &PrFacts) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in role {
+        let who = if name == AUTHOR { &pr.author } else { name };
+        if !out.contains(who) {
+            out.push(who.clone());
+        }
+    }
+    if out.is_empty() {
+        out.push(pr.author.clone());
+    }
+    out
+}
+
+/// 確認する人。頼まれた人 → 決まりに書いた人 → 作者以外のメンバー → 作者(1 人のプロジェクト)。
+/// 自分の PR は自分では確認しないので、作者は外す。
 fn reviewers(pr: &PrFacts, s: &Settings) -> Vec<String> {
     if !pr.requested_reviewers.is_empty() {
         return pr.requested_reviewers.clone();
     }
-    let others: Vec<String> = s
-        .members
-        .iter()
-        .filter(|m| **m != pr.author)
-        .cloned()
-        .collect();
-    if others.is_empty() {
+    let others = |list: &[String]| -> Vec<String> {
+        list.iter()
+            .filter(|m| **m != pr.author && *m != AUTHOR)
+            .cloned()
+            .collect()
+    };
+    let configured = others(&s.review);
+    if !configured.is_empty() {
+        return configured;
+    }
+    let members = others(&s.members);
+    if members.is_empty() {
         vec![pr.author.clone()]
     } else {
-        others
+        members
     }
 }
 
@@ -125,8 +142,9 @@ pub(crate) mod tests {
     pub(crate) fn team() -> Settings {
         Settings {
             members: vec!["ann".into(), "bob".into()],
-            merger: Role::Reviewer,
-            deployer: Role::Reviewer,
+            review: vec![],
+            merge: vec!["bob".into()],
+            deploy: vec!["bob".into()],
             merged_is_shipped: false,
         }
     }
@@ -156,6 +174,34 @@ pub(crate) mod tests {
         s.members = vec!["ann".into()];
         assert_eq!(judge_pr(&pr(), &s).turn, vec!["ann"]);
         s.members = vec![];
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["ann"]);
+    }
+
+    #[test]
+    fn roles_can_name_people_or_the_author() {
+        let mut s = team();
+        s.members = vec!["ann".into(), "bob".into(), "cat".into()];
+        s.review = vec!["cat".into()];
+        s.merge = vec!["author".into(), "dan".into(), "ann".into()];
+        s.deploy = vec!["dan".into()];
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["cat"]);
+        let mut p = pr();
+        p.review = Review::Approved;
+        assert_eq!(judge_pr(&p, &s).turn, vec!["ann", "dan"]);
+        p.lifecycle = Lifecycle::Merged;
+        assert_eq!(judge_pr(&p, &s).turn, vec!["dan"]);
+    }
+
+    #[test]
+    fn the_author_does_not_review_their_own_pr() {
+        let mut s = team();
+        // 確認する人に書かれた本人が出した PR は、ほかのメンバーが確認する
+        s.review = vec!["ann".into()];
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["bob"]);
+        s.review = vec!["author".into()];
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["bob"]);
+        // ほかに誰も居なければ本人
+        s.members = vec!["ann".into()];
         assert_eq!(judge_pr(&pr(), &s).turn, vec!["ann"]);
     }
 
@@ -213,7 +259,7 @@ pub(crate) mod tests {
         );
         assert_eq!(v.turn, vec!["bob"]);
         let mut s = team();
-        s.merger = Role::Author;
+        s.merge = vec![];
         assert_eq!(judge_pr(&p, &s).turn, vec!["ann"]);
     }
 
