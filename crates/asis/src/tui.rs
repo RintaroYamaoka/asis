@@ -1,6 +1,6 @@
 //! ターミナルの画面。描くことと、キーを受けることだけ。判断は持たない。
 use crate::view::{Filter, Row};
-use crate::{clip, load, only_text, turn_text, Section, Source};
+use crate::{clip, only_text, turn_text, Loader, Section, Source};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -55,12 +55,19 @@ pub fn run(source: Source, filter: Filter) -> std::io::Result<()> {
     // 読み込みは別の流れで回す。画面は止めない。
     let (tx, rx) = mpsc::channel::<Vec<Section>>();
     let (kick, kicked) = mpsc::channel::<()>();
-    std::thread::spawn(move || loop {
-        if tx.send(load(&source)).is_err() {
-            break;
-        }
-        if let Err(mpsc::RecvTimeoutError::Disconnected) = kicked.recv_timeout(REFRESH) {
-            break;
+    std::thread::spawn(move || {
+        let mut loader = Loader::new(source);
+        // 自動の読み直しは変わった repo だけ。キーで頼まれたら全部。
+        let mut force = false;
+        loop {
+            if tx.send(loader.load(force)).is_err() {
+                break;
+            }
+            force = match kicked.recv_timeout(REFRESH) {
+                Ok(()) => true,
+                Err(mpsc::RecvTimeoutError::Timeout) => false,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
         }
     });
 
@@ -221,7 +228,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &App) {
                 Span::styled(title, Style::new().add_modifier(Modifier::BOLD)),
                 Span::styled(only_text(&v.only), Style::new().fg(DIM)),
             ]));
-            if let Some(note) = &v.note {
+            for note in &v.notes {
                 lines.push(Line::styled(format!("  {note}"), Style::new().fg(FAINT)));
             }
             let mut any = false;

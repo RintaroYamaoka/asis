@@ -7,8 +7,9 @@ mod tui;
 mod view;
 
 use config::Project;
+use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use view::{Filter, RepoView};
 
 const HELP: &str = "asis — development, as is
@@ -144,7 +145,7 @@ fn run() -> Result<(), String> {
     }
 
     if plain || !std::io::stdout().is_terminal() {
-        let sections = load(&source);
+        let sections = Loader::new(source).load(true);
         print!("{}", plain_text(&sections, filter));
         let failed = sections
             .iter()
@@ -181,89 +182,251 @@ fn resolve(repo: &str) -> Result<Project, String> {
     }
 }
 
-/// 定義を読み、全部の repo を同時に読み、指定の順で返す。
-pub fn load(source: &Source) -> Vec<Section> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let stopped = || "読み込みが途中で止まりました".to_string();
-    // 1. 見る repo の定義を同時に読む。
-    let resolved: Vec<Result<Project, String>> = std::thread::scope(|s| {
-        let handles: Vec<_> = source
+/// 何分かに 1 回は、変わったかどうかに関係なく全部 読み直す(取りこぼしに備える)。
+const FULL_EVERY: Duration = Duration::from_secs(600);
+
+/// 読んだときの印と、読んだ中身か、読めなかった理由
+type Read<T> = (String, Result<T, String>);
+
+/// 読んだものを覚えておき、変わった repo だけ読み直す。
+/// GitHub に聞ける量には 1 時間あたりの上限があり、同じアカウントで動くほかの道具と分け合うので、
+/// 毎回 全部は読まない。変わったかどうかは、全部の repo を 1 回の軽い問い合わせで聞く。
+pub struct Loader {
+    source: Source,
+    /// 見る repo の定義。(読んだときの印, 定義か、読めなかった理由)
+    definitions: HashMap<String, Read<Project>>,
+    /// repo の事実。キーは repo と数えないチェックの組。(読んだときの印, 事実か、読めなかった理由)
+    facts: HashMap<String, Read<github::RepoFacts>>,
+    last_full: Option<Instant>,
+}
+
+/// 覚えているものを捨てて読み直すか。
+/// 覚えが無い・前に読めなかった・印が変わった・印を聞けなかった・チェックが動いていた、のどれかなら読み直す。
+fn needs_fetch(force: bool, cached: Option<(&str, bool, bool)>, current: Option<&str>) -> bool {
+    match (cached, current) {
+        (Some((stamp, ok, running)), Some(now)) => force || !ok || running || stamp != now,
+        _ => true,
+    }
+}
+
+/// 読み直しの記録。環境変数 `ASIS_LOG` に書き出し先があるときだけ書く(調べるとき用)。
+fn log(line: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("ASIS_LOG") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+fn facts_key(repo: &str, ignore_checks: &[String]) -> String {
+    format!("{repo}\n{}", ignore_checks.join("\n"))
+}
+
+impl Loader {
+    pub fn new(source: Source) -> Loader {
+        Loader {
+            source,
+            definitions: HashMap::new(),
+            facts: HashMap::new(),
+            last_full: None,
+        }
+    }
+
+    /// 定義を読み、変わった repo を同時に読み、指定の順で返す。`force` なら全部 読み直す。
+    pub fn load(&mut self, force: bool) -> Vec<Section> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let stopped = || "読み込みが途中で止まりました".to_string();
+        let force = force || self.last_full.is_none_or(|t| t.elapsed() > FULL_EVERY);
+        if force {
+            self.last_full = Some(Instant::now());
+        }
+
+        // 0. 知っている repo の全部について、変わったかどうかの印を 1 回で聞く。
+        let mut known: Vec<String> = self.source.watch.clone();
+        let cached_projects = self
+            .definitions
+            .values()
+            .filter_map(|(_, p)| p.as_ref().ok());
+        for repo in cached_projects
+            .chain(self.source.local.iter())
+            .flat_map(|p| p.repos.iter())
+        {
+            if !known.contains(repo) {
+                known.push(repo.clone());
+            }
+        }
+        let stamps: HashMap<String, String> = github::stamps(&known)
+            .map(|s| known.iter().cloned().zip(s).collect())
+            .unwrap_or_default();
+
+        // 1. 見る repo の定義。変わったものだけ同時に読む。
+        let stale: Vec<&String> = self
+            .source
             .watch
             .iter()
-            .map(|r| s.spawn(move || resolve(r)))
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
-            .collect()
-    });
-    // 定義を読めなかった repo は、その名前で理由を出す。
-    let projects: Vec<(&str, Result<&Project, String>)> = source
-        .watch
-        .iter()
-        .zip(&resolved)
-        .map(|(repo, r)| (repo.as_str(), r.as_ref().map_err(String::clone)))
-        .chain(source.local.iter().map(|p| (p.name.as_str(), Ok(p))))
-        .collect();
-    // 2. この PC の上の作業(worktree・ペイン)を読む。
-    let repos: Vec<String> = projects
-        .iter()
-        .filter_map(|(_, p)| p.as_ref().ok())
-        .flat_map(|p| p.repos.iter().cloned())
-        .collect();
-    let works = local::gather(&repos, &source.roots);
-    let works = &works;
-    // 3. 全部の repo を同時に読む。
-    std::thread::scope(|s| {
-        let handles: Vec<_> = projects
-            .into_iter()
-            .map(|(label, p)| match p {
-                Ok(p) => Ok((
-                    p,
-                    p.repos
-                        .iter()
-                        .map(|r| {
-                            s.spawn(move || {
-                                github::fetch(r, &p.ignore_checks).map(|f| {
-                                    let only = source.only.get(r).map(Vec::as_slice).unwrap_or(&[]);
-                                    let mine: Vec<local::Work> =
-                                        works.iter().filter(|w| w.repo == *r).cloned().collect();
-                                    view::build(&f, p, only, &mine, now)
-                                })
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                )),
-                Err(e) => Err((label, e)),
+            .filter(|r| {
+                let cached = self
+                    .definitions
+                    .get(*r)
+                    .map(|(stamp, p)| (stamp.as_str(), p.is_ok(), false));
+                needs_fetch(force, cached, stamps.get(*r).map(String::as_str))
             })
             .collect();
-        handles
+        let definitions_read = stale.len();
+        let resolved: Vec<Result<Project, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = stale.iter().map(|r| s.spawn(move || resolve(r))).collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
+                .collect()
+        });
+        for (repo, project) in stale
             .into_iter()
-            .map(|h| match h {
-                Ok((p, hs)) => Section {
+            .cloned()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .zip(resolved)
+        {
+            self.definitions.insert(
+                repo.clone(),
+                (stamps.get(&repo).cloned().unwrap_or_default(), project),
+            );
+        }
+        // 定義を読めなかった repo は、その名前で理由を出す。
+        let projects: Vec<(&str, Result<&Project, String>)> = self
+            .source
+            .watch
+            .iter()
+            .map(|repo| {
+                (
+                    repo.as_str(),
+                    self.definitions[repo].1.as_ref().map_err(String::clone),
+                )
+            })
+            .chain(self.source.local.iter().map(|p| (p.name.as_str(), Ok(p))))
+            .collect();
+
+        // 2. repo の事実。変わったものだけ同時に読む。
+        let mut wanted: Vec<(String, &str, &[String])> = Vec::new();
+        for p in projects.iter().filter_map(|(_, p)| p.as_ref().ok()) {
+            for repo in &p.repos {
+                let key = facts_key(repo, &p.ignore_checks);
+                let cached = self.facts.get(&key).map(|(stamp, f)| {
+                    (
+                        stamp.as_str(),
+                        f.is_ok(),
+                        f.as_ref().is_ok_and(|f| f.has_running_checks()),
+                    )
+                });
+                if needs_fetch(force, cached, stamps.get(repo).map(String::as_str))
+                    && !wanted.iter().any(|(k, _, _)| *k == key)
+                {
+                    wanted.push((key, repo.as_str(), p.ignore_checks.as_slice()));
+                }
+            }
+        }
+        log(&format!(
+            "load force={force} known={} stamps={} definitions_read={} facts_read=[{}]",
+            known.len(),
+            stamps.len(),
+            definitions_read,
+            wanted
+                .iter()
+                .map(|(_, repo, _)| *repo)
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+        let fetched: Vec<Result<github::RepoFacts, String>> = std::thread::scope(|s| {
+            let handles: Vec<_> = wanted
+                .iter()
+                .map(|(_, repo, ignore)| s.spawn(move || github::fetch(repo, ignore)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
+                .collect()
+        });
+        let fresh: Vec<(String, Read<github::RepoFacts>)> = wanted
+            .iter()
+            .zip(fetched)
+            .map(|((key, repo, _), f)| {
+                (
+                    key.clone(),
+                    (stamps.get(*repo).cloned().unwrap_or_default(), f),
+                )
+            })
+            .collect();
+        drop(wanted);
+
+        // 3. この PC の上の作業(worktree・ペイン)は、毎回 読む(GitHub には聞かない)。
+        let repos: Vec<String> = projects
+            .iter()
+            .filter_map(|(_, p)| p.as_ref().ok())
+            .flat_map(|p| p.repos.iter().cloned())
+            .collect();
+        let works = local::gather(&repos, &self.source.roots);
+
+        // 4. 並べる。
+        let facts: HashMap<&str, &Result<github::RepoFacts, String>> = self
+            .facts
+            .iter()
+            .map(|(k, (_, f))| (k.as_str(), f))
+            .chain(fresh.iter().map(|(k, (_, f))| (k.as_str(), f)))
+            .collect();
+        let sections = projects
+            .iter()
+            .map(|(label, p)| match p {
+                Ok(p) => Section {
                     project: p.name.clone(),
-                    repos: hs
-                        .into_iter()
-                        .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
+                    repos: p
+                        .repos
+                        .iter()
+                        .map(
+                            |repo| match facts.get(facts_key(repo, &p.ignore_checks).as_str()) {
+                                Some(Ok(f)) => {
+                                    let only = self
+                                        .source
+                                        .only
+                                        .get(repo)
+                                        .map(Vec::as_slice)
+                                        .unwrap_or(&[]);
+                                    let mine: Vec<local::Work> =
+                                        works.iter().filter(|w| w.repo == *repo).cloned().collect();
+                                    Ok(view::build(f, p, only, &mine, now))
+                                }
+                                Some(Err(e)) => Err(e.clone()),
+                                None => Err(stopped()),
+                            },
+                        )
                         .collect(),
                 },
-                Err((label, e)) => Section {
+                Err(e) => Section {
                     project: label.to_string(),
-                    repos: vec![Err(e)],
+                    repos: vec![Err(e.clone())],
                 },
             })
-            .collect()
-    })
+            .collect();
+        drop(facts);
+        drop(projects);
+        self.facts.extend(fresh);
+        sections
+    }
 }
 
 fn plain_text(sections: &[Section], filter: Filter) -> String {
     let mut out = String::new();
     for v in sections.iter().flat_map(|s| &s.repos).flatten() {
         out.push_str(&format!("\n{}{}\n", v.repo, only_text(&v.only)));
-        if let Some(note) = &v.note {
+        for note in &v.notes {
             out.push_str(&format!("  ({note})\n"));
         }
         let mut shown = 0;
@@ -362,6 +525,22 @@ mod tests {
         assert!(all.contains("!#21    pr 21  [ann] 5h  チェックが落ちている(lint)"));
         let mine = plain_text(&sections, Filter::Mine);
         assert!(mine.contains("#7 ") && !mine.contains("#21") && !mine.contains("#8"));
+    }
+
+    #[test]
+    fn refetch_only_what_changed() {
+        // 印が同じで、前に読めていて、チェックも止まっていれば、読み直さない
+        assert!(!needs_fetch(false, Some(("a", true, false)), Some("a")));
+        // 印が変わった
+        assert!(needs_fetch(false, Some(("a", true, false)), Some("b")));
+        // 前に読めなかった・チェックが動いていた(終わりは印に出ない)
+        assert!(needs_fetch(false, Some(("a", false, false)), Some("a")));
+        assert!(needs_fetch(false, Some(("a", true, true)), Some("a")));
+        // 覚えが無い・印を聞けなかった・全部 読み直すとき
+        assert!(needs_fetch(false, None, Some("a")));
+        assert!(needs_fetch(false, Some(("a", true, false)), None));
+        assert!(needs_fetch(true, Some(("a", true, false)), Some("a")));
+        assert_ne!(facts_key("o/r", &[]), facts_key("o/r", &["x".to_string()]));
     }
 
     #[test]

@@ -30,12 +30,15 @@ query($owner:String!,$name:String!){
   repository(owner:$owner,name:$name){
     merged: pullRequests(states:MERGED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
       number title body state baseRefName headRefName updatedAt mergedAt author{login __typename}
+      mergeCommit{oid}
       closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
     }}
     openIssues: issues(states:OPEN, first:100, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{...I}}
     closedIssues: issues(states:CLOSED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{...I}}
     refs(refPrefix:"refs/heads/", first:100, orderBy:{field:TAG_COMMIT_DATE,direction:DESC}){nodes{name}}
-    deployments(last:50){nodes{environment latestStatus{state} commit{committedDate}}}
+    deployments(last:50){nodes{environment latestStatus{state} commit{oid committedDate}}}
+    defaultBranchRef{name target{... on Commit{history(first:100){nodes{oid}}}}}
+    assignableUsers(first:100){nodes{login}}
   }
 }
 fragment I on Issue { number title state updatedAt author{login} assignees(first:5){nodes{login}} }"#;
@@ -71,8 +74,19 @@ pub struct RepoFacts {
     pub branches: Vec<String>,
     /// 本番デプロイの記録が 1 件も無い
     pub no_deployments: bool,
-    /// PR を出したことのある人(bot を除く)
+    /// repo で動ける人(担当にできる人)。読めなければ、PR を出したことのある人(bot を除く)
     pub people: Vec<String>,
+    /// 読み切れなかったことの注記。黙って欠けさせない
+    pub notes: Vec<String>,
+}
+
+impl RepoFacts {
+    /// チェックが動いている PR がある(終わりは PR の更新時刻に出ないので、次も読み直す)
+    pub fn has_running_checks(&self) -> bool {
+        self.prs
+            .iter()
+            .any(|p| p.lifecycle == Lifecycle::Open && p.checks == Checks::Pending)
+    }
 }
 
 pub fn fetch(repo: &str, ignore_checks: &[String]) -> Result<RepoFacts, String> {
@@ -134,7 +148,6 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
     let r = &v["data"]["repository"];
     let repo = r["nameWithOwner"].as_str()?.to_string();
 
-    // 成功した本番デプロイのうち、いちばん新しい commit の時刻。
     let production: Vec<&Value> = nodes(&r["deployments"])
         .filter(|d| {
             d["environment"]
@@ -142,12 +155,43 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
                 .is_some_and(|e| e.to_ascii_lowercase().starts_with("prod"))
         })
         .collect();
-    let shipped_until = production
+    let succeeded: Vec<&Value> = production
         .iter()
         .filter(|d| d["latestStatus"]["state"] == "SUCCESS")
+        .cloned()
+        .collect();
+    // 既定のブランチの commit の並び(新しい順)。本番に出たかは、時刻ではなくこの順番で決める。
+    let default_branch = r["defaultBranchRef"]["name"].as_str().unwrap_or("");
+    let history: Vec<&str> = nodes(&r["defaultBranchRef"]["target"]["history"])
+        .filter_map(|c| c["oid"].as_str())
+        .collect();
+    let position = |oid: &str| history.iter().position(|h| *h == oid);
+    // 成功した本番デプロイのうち、いちばん新しい commit の位置と時刻。
+    let shipped_at = succeeded
+        .iter()
+        .filter_map(|d| d["commit"]["oid"].as_str().and_then(position))
+        .min();
+    let shipped_until = succeeded
+        .iter()
         .filter_map(|d| d["commit"]["committedDate"].as_str())
-        .max()
-        .map(str::to_string);
+        .max();
+    let is_shipped = |p: &Value| -> bool {
+        let Some(merged_at) = p["mergedAt"].as_str() else {
+            return false;
+        };
+        let on_default = p["baseRefName"].as_str() == Some(default_branch);
+        match (
+            p["mergeCommit"]["oid"].as_str().and_then(position),
+            shipped_at,
+        ) {
+            // どちらも並びの中にある: 取り込みの commit が、本番の commit と同じか、それより前
+            (Some(merge), Some(shipped)) => merge >= shipped,
+            // 取り込みが並びより古い(100 commit より前)で、本番の commit は並びの中にある
+            (None, Some(_)) if on_default && !history.is_empty() => true,
+            // 並びで決められないときは、時刻で比べる
+            _ => shipped_until.is_some_and(|until| merged_at <= until),
+        }
+    };
 
     let mut prs = Vec::new();
     let mut pr_updated = Vec::new();
@@ -159,7 +203,6 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
             people.push(author.clone());
         }
         let commit = &p["commits"]["nodes"][0]["commit"];
-        let merged_at = p["mergedAt"].as_str();
         let (checks, failing) = checks(&commit["statusCheckRollup"]["contexts"], ignore_checks);
         prs.push(PrFacts {
             repo: repo.clone(),
@@ -182,12 +225,23 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
                 Some("CHANGES_REQUESTED") => Review::ChangesRequested,
                 _ => Review::None,
             },
-            requested_reviewers: nodes(&p["reviewRequests"]).map(|n| s(&n["requestedReviewer"]["login"])).filter(|l| !l.is_empty()).collect(),
-            unanswered_comment: unanswered(p, &author, commit["committedDate"].as_str().unwrap_or("")),
-            // 取り込みの時刻が、本番に出た最新の commit の時刻以前なら、本番に含まれている。
-            shipped: matches!((merged_at, &shipped_until), (Some(m), Some(until)) if m <= until.as_str()),
+            requested_reviewers: nodes(&p["reviewRequests"])
+                .map(|n| s(&n["requestedReviewer"]["login"]))
+                .filter(|l| !l.is_empty())
+                .collect(),
+            unanswered_comment: unanswered(
+                p,
+                &author,
+                commit["committedDate"].as_str().unwrap_or(""),
+            ),
+            shipped: is_shipped(p),
             closes: nodes(&p["closingIssuesReferences"])
-                .filter_map(|n| Some(IssueRef { repo: n["repository"]["nameWithOwner"].as_str()?.to_string(), number: n["number"].as_u64()? }))
+                .filter_map(|n| {
+                    Some(IssueRef {
+                        repo: n["repository"]["nameWithOwner"].as_str()?.to_string(),
+                        number: n["number"].as_u64()?,
+                    })
+                })
                 .collect(),
         });
         pr_updated.push(s(&p["updatedAt"]));
@@ -208,6 +262,31 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
         })
         .collect();
 
+    // repo で動ける人。読めたらそちらを使う。
+    let assignable: Vec<String> = nodes(&r["assignableUsers"])
+        .map(|u| s(&u["login"]))
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !assignable.is_empty() {
+        people = assignable;
+    }
+
+    let mut notes = Vec::new();
+    if nodes(&r["open"]).count() >= 100 {
+        notes.push(
+            "開いている PR が 100 本以上あります。新しく動いた 100 本だけを出しています"
+                .to_string(),
+        );
+    }
+    // 読んだ中でいちばん古い取り込みが、まだ本番に出ていない = それより前にも、出ていないものが有りうる。
+    let merged: Vec<&PrFacts> = prs
+        .iter()
+        .filter(|p| p.lifecycle == Lifecycle::Merged)
+        .collect();
+    if !production.is_empty() && merged.len() >= 40 && merged.last().is_some_and(|p| !p.shipped) {
+        notes.push("取り込み済みは新しい 40 本だけを読んでいます。それより前に取り込んで本番に出ていない PR は出ていません".to_string());
+    }
+
     Some(RepoFacts {
         repo,
         viewer: s(&v["data"]["viewer"]["login"]),
@@ -218,7 +297,39 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
         branches: nodes(&r["refs"]).map(|n| s(&n["name"])).collect(),
         no_deployments: production.is_empty(),
         people,
+        notes,
     })
+}
+
+/// 変わったかどうかだけを見る印。全部の repo を 1 回の問い合わせで聞く。
+/// 押し込み・PR・issue・本番デプロイのどれかが動くと、その repo の印が変わる。
+pub fn stamps(repos: &[String]) -> Result<Vec<String>, String> {
+    let mut query = String::from("{");
+    for (i, repo) in repos.iter().enumerate() {
+        let (owner, name) = repo
+            .split_once('/')
+            .ok_or_else(|| format!("`{repo}` は owner/name の形ではありません"))?;
+        if repo.contains(['"', '\\']) {
+            return Err(format!("`{repo}` に使えない文字があります"));
+        }
+        query.push_str(&format!(
+            r#"r{i}: repository(owner:"{owner}",name:"{name}"){{pushedAt pullRequests(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} issues(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} deployments(last:1){{nodes{{createdAt latestStatus{{state}}}}}}}}"#
+        ));
+    }
+    query.push('}');
+    let out = Command::new("gh")
+        .args(["api", "graphql", "-f", &format!("query={query}")])
+        .output()
+        .map_err(|e| format!("gh を実行できません({e})"))?;
+    // 読めない repo が混ざると全体は失敗の印で返るが、読めた分の中身は入っているので、そのまま使う。
+    let v: Value =
+        serde_json::from_slice(&out.stdout).map_err(|e| format!("返事を読めません({e})"))?;
+    if v["data"].is_null() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok((0..repos.len())
+        .map(|i| v["data"][format!("r{i}")].to_string())
+        .collect())
 }
 
 /// チェックを 1 つずつ見て、まとめる。数えないと決めた名前は外す。
@@ -307,6 +418,15 @@ mod tests {
             "refs": {"nodes": [{"name": "main"}, {"name": "3-wip"}]},
             "deployments": {"nodes": deployments}
         }}})
+    }
+
+    /// 既定のブランチの並び(新しい順)と、担当にできる人を足す
+    fn with_history(mut v: Value, oids: &[&str], users: &[&str]) -> Value {
+        let r = &mut v["data"]["repository"];
+        r["defaultBranchRef"] = json!({"name": "main", "target": {"history": {"nodes": oids.iter().map(|o| json!({"oid": o})).collect::<Vec<_>>()}}});
+        r["assignableUsers"] =
+            json!({"nodes": users.iter().map(|u| json!({"login": u})).collect::<Vec<_>>()});
+        v
     }
 
     #[test]
@@ -445,6 +565,90 @@ mod tests {
             vec![true, true, false]
         );
         assert!(!f.no_deployments);
+    }
+
+    #[test]
+    fn shipped_follows_the_order_of_commits_not_their_times() {
+        // 並び(新しい順): c4 c3 c2 c1。本番に出ているのは c2 まで。
+        let merged = |oid: &str, at: &str, base: &str| {
+            pr(
+                json!({"state": "MERGED", "mergedAt": at, "mergeCommit": {"oid": oid}, "baseRefName": base}),
+            )
+        };
+        let deps = json!([
+            {"environment": "Production", "latestStatus": {"state": "SUCCESS"}, "commit": {"oid": "c2", "committedDate": "2026-03-05T00:00:00Z"}},
+            {"environment": "Production", "latestStatus": {"state": "SUCCESS"}, "commit": {"oid": "c1", "committedDate": "2026-03-09T00:00:00Z"}}
+        ]);
+        let prs = vec![
+            merged("c1", "2026-03-08T00:00:00Z", "main"), // 時刻は本番の commit より後だが、並びでは前 → 出た
+            merged("c2", "2026-03-05T00:00:00Z", "main"), // 本番の commit そのもの → 出た
+            merged("c3", "2026-03-01T00:00:00Z", "main"), // 時刻は前だが、並びでは後 → 出ていない
+            merged("old", "2026-01-01T00:00:00Z", "main"), // 並びより古い取り込み → 出た
+            merged("side", "2026-01-01T00:00:00Z", "feature"), // 別のブランチへの取り込みは、時刻で比べる
+            merged("side2", "2026-03-10T00:00:00Z", "feature"),
+        ];
+        let f = parse(
+            &with_history(repo(vec![], prs, deps), &["c4", "c3", "c2", "c1"], &[]),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            f.prs.iter().map(|p| p.shipped).collect::<Vec<_>>(),
+            vec![true, true, false, true, true, false]
+        );
+    }
+
+    #[test]
+    fn people_are_those_who_can_work_on_the_repo() {
+        let f = parse(
+            &with_history(
+                repo(vec![pr(json!({}))], vec![], json!([])),
+                &[],
+                &["ann", "bob", "cat"],
+            ),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(f.people, vec!["ann", "bob", "cat"]);
+        // 読めなければ、PR を出したことのある人
+        let f = parse(&repo(vec![pr(json!({}))], vec![], json!([])), &[]).unwrap();
+        assert_eq!(f.people, vec!["ann"]);
+    }
+
+    #[test]
+    fn notes_say_when_something_was_cut_off() {
+        let f = parse(&repo(vec![pr(json!({}))], vec![], json!([])), &[]).unwrap();
+        assert!(f.notes.is_empty() && !f.has_running_checks());
+        let f = parse(
+            &repo((0..100).map(|_| pr(json!({}))).collect(), vec![], json!([])),
+            &[],
+        )
+        .unwrap();
+        assert!(f.notes[0].contains("100 本以上"));
+        // 読んだ中でいちばん古い取り込みが、まだ本番に出ていない
+        let deps = json!([{"environment": "Production", "latestStatus": {"state": "SUCCESS"}, "commit": {"oid": "x", "committedDate": "2026-03-01T00:00:00Z"}}]);
+        let unshipped: Vec<Value> = (0..40)
+            .map(|_| pr(json!({"state": "MERGED", "mergedAt": "2026-03-02T00:00:00Z"})))
+            .collect();
+        let f = parse(&repo(vec![], unshipped, deps.clone()), &[]).unwrap();
+        assert!(f.notes[0].contains("40 本"));
+        let mut mixed: Vec<Value> = (0..39)
+            .map(|_| pr(json!({"state": "MERGED", "mergedAt": "2026-03-02T00:00:00Z"})))
+            .collect();
+        mixed.push(pr(
+            json!({"state": "MERGED", "mergedAt": "2026-02-01T00:00:00Z"}),
+        ));
+        assert!(parse(&repo(vec![], mixed, deps), &[])
+            .unwrap()
+            .notes
+            .is_empty());
+        // チェックが動いている PR
+        let running = pr(
+            json!({"commits": {"nodes": [{"commit": {"committedDate": "x", "statusCheckRollup": {"contexts": {"nodes": [{"__typename": "CheckRun", "name": "t", "status": "IN_PROGRESS", "conclusion": null}]}}}}]}}),
+        );
+        assert!(parse(&repo(vec![running], vec![], json!([])), &[])
+            .unwrap()
+            .has_running_checks());
     }
 
     #[test]

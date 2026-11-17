@@ -14,7 +14,8 @@ pub struct RepoView {
     pub viewer: String,
     /// この人たちの分だけを出している。空なら全部
     pub only: Vec<String>,
-    pub note: Option<String>,
+    /// 読み方についての注記(本番の扱い・読み切れなかったこと)
+    pub notes: Vec<String>,
     pub groups: Vec<Group>,
 }
 
@@ -270,9 +271,12 @@ pub fn build(
         repo: f.repo.clone(),
         viewer: f.viewer.clone(),
         only: only.to_vec(),
-        note: f
+        notes: f
             .no_deployments
-            .then(|| "本番デプロイの記録が無いので、取り込みを本番として扱っています".to_string()),
+            .then(|| "本番デプロイの記録が無いので、取り込みを本番として扱っています".to_string())
+            .into_iter()
+            .chain(f.notes.iter().cloned())
+            .collect(),
         groups,
     }
 }
@@ -448,6 +452,7 @@ pub(crate) mod tests {
             branches: vec![],
             no_deployments: false,
             people: vec!["ann".into(), "bob".into()],
+            notes: vec![],
         };
         let project = Project {
             name: "p".into(),
@@ -505,7 +510,7 @@ pub(crate) mod tests {
         );
         assert_eq!(loose[0].why, "チェックが落ちている(lint)");
         assert_eq!(loose[0].url, "https://github.com/o/r/pull/21");
-        assert!(v.note.is_none());
+        assert!(v.notes.is_empty());
     }
 
     #[test]
