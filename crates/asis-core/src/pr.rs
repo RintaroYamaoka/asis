@@ -90,27 +90,28 @@ fn named(role: &[String], pr: &PrFacts) -> Vec<String> {
     out
 }
 
-/// 確認する人。頼まれた人 → 決まりに書いた人 → 作者以外のメンバー → 作者(1 人のプロジェクト)。
-/// 自分の PR は自分では確認しないので、作者は外す。
+/// 確認する人。頼まれた人 → 決まりに書いた人 → 作者以外のメンバー。
+/// 自分の PR は自分では確認しないので、作者は外す。外して誰も残らなければ作者
+/// (1 人のプロジェクト、または確認する人に書かれた本人の PR)。
+/// 決まりに確認する人が書いてあるときは、書かれていないメンバーへは回さない。
 fn reviewers(pr: &PrFacts, s: &Settings) -> Vec<String> {
     if !pr.requested_reviewers.is_empty() {
         return pr.requested_reviewers.clone();
     }
-    let others = |list: &[String]| -> Vec<String> {
-        list.iter()
-            .filter(|m| **m != pr.author && *m != AUTHOR)
-            .cloned()
-            .collect()
+    let pool = if s.review.is_empty() {
+        &s.members
+    } else {
+        &s.review
     };
-    let configured = others(&s.review);
-    if !configured.is_empty() {
-        return configured;
-    }
-    let members = others(&s.members);
-    if members.is_empty() {
+    let others: Vec<String> = pool
+        .iter()
+        .filter(|m| **m != pr.author && *m != AUTHOR)
+        .cloned()
+        .collect();
+    if others.is_empty() {
         vec![pr.author.clone()]
     } else {
-        members
+        others
     }
 }
 
@@ -195,13 +196,23 @@ pub(crate) mod tests {
     #[test]
     fn the_author_does_not_review_their_own_pr() {
         let mut s = team();
-        // 確認する人に書かれた本人が出した PR は、ほかのメンバーが確認する
+        s.members = vec!["ann".into(), "bob".into(), "cat".into()];
+        // 確認する人が何人か書いてあれば、作者を外した残りが確認する
+        s.review = vec!["ann".into(), "cat".into()];
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["cat"]);
+        // 決まりが無ければ、作者以外のメンバー
+        s.review = vec![];
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["bob", "cat"]);
+    }
+
+    #[test]
+    fn a_sole_named_reviewer_keeps_their_own_pr() {
+        // 確認する人に書かれた本人が出した PR は、本人の番のまま。
+        // 確認する人に書かれていないメンバーへは回さない。
+        let mut s = team();
         s.review = vec!["ann".into()];
-        assert_eq!(judge_pr(&pr(), &s).turn, vec!["bob"]);
+        assert_eq!(judge_pr(&pr(), &s).turn, vec!["ann"]);
         s.review = vec!["author".into()];
-        assert_eq!(judge_pr(&pr(), &s).turn, vec!["bob"]);
-        // ほかに誰も居なければ本人
-        s.members = vec!["ann".into()];
         assert_eq!(judge_pr(&pr(), &s).turn, vec!["ann"]);
     }
 
