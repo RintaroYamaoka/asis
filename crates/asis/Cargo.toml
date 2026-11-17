@@ -1,0 +1,10 @@
+[package]
+name = "asis"
+version = "0.1.0"
+edition = "2021"
+description = "development, as is"
+license = "MIT"
+
+[dependencies]
+asis-core = { path = "../asis-core" }
+serde_json = "1"
