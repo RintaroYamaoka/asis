@@ -573,7 +573,7 @@ pub(crate) mod tests {
             title: format!("{label} title"),
             open,
             path: if open.is_some() {
-                "docs/計画.md".into()
+                "docs/plan.md".into()
             } else {
                 String::new()
             },
@@ -581,10 +581,10 @@ pub(crate) mod tests {
             prs: prs.to_vec(),
         };
         let extra = [
-            task("S-1", Some(true), &[1]), // 落ちているチェックの PR #21
-            task("C-2", Some(true), &[]),  // PR がまだ無い
-            task("AR-7", None, &[2]),      // 番号だけ。PR は本番に出た
-            task("S-9", Some(false), &[]), // 済んだ
+            task("T-1", Some(true), &[1]), // 落ちているチェックの PR #21
+            task("T-4", Some(true), &[]),  // PR がまだ無い
+            task("T-2", None, &[2]),       // 番号だけ。PR は本番に出た
+            task("T-3", Some(false), &[]), // 済んだ
         ];
         let project = Project {
             name: "p".into(),
@@ -594,14 +594,14 @@ pub(crate) mod tests {
         let v = build(&sample_facts(&[]), &project, &[], &[], &extra, 1795005296);
         let rows: Vec<&Row> = v.groups.iter().flat_map(|g| &g.rows).collect();
         let doc = |l: &str| rows.iter().find(|r| r.kind == Kind::Doc && r.label == l);
-        assert_eq!(doc("S-1").map(|r| r.stage), Some(Stage::NeedsFix));
+        assert_eq!(doc("T-1").map(|r| r.stage), Some(Stage::NeedsFix));
         assert_eq!(
-            doc("S-1").unwrap().url,
-            "https://github.com/o/r/blob/HEAD/docs/計画.md"
+            doc("T-1").unwrap().url,
+            "https://github.com/o/r/blob/HEAD/docs/plan.md"
         );
-        assert_eq!(doc("C-2").map(|r| r.stage), Some(Stage::Todo));
+        assert_eq!(doc("T-4").map(|r| r.stage), Some(Stage::Todo));
         // 本番に出た番号だけのタスクと、済んだタスクは出さない
-        assert!(doc("AR-7").is_none() && doc("S-9").is_none());
+        assert!(doc("T-2").is_none() && doc("T-3").is_none());
         // ファイルのタスクに入った PR は、つながっていない PR の段に出ない
         assert!(!rows.iter().any(|r| r.kind == Kind::Pr && r.number == 21));
     }

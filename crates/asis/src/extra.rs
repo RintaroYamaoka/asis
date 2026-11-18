@@ -18,7 +18,7 @@ pub trait Reader: Send + Sync {
 /// ファイルに書かれたタスク 1 つ
 #[derive(Debug, Clone, PartialEq)]
 pub struct FileTask {
-    /// 画面の番号の欄に出す字(`S-12` など)
+    /// 画面の番号の欄に出す字(`T-12` など)
     pub label: String,
     pub title: String,
     /// まだ済んでいないか。`None` は、つながる PR が開いているあいだだけ開いている
@@ -114,13 +114,13 @@ mod tests {
     #[test]
     fn paths_are_encoded_and_listed() {
         assert_eq!(
-            encode_path("docs/a b/計画.md"),
-            "docs/a%20b/%E8%A8%88%E7%94%BB.md"
+            encode_path("docs/a b/メモ.md"),
+            "docs/a%20b/%E3%83%A1%E3%83%A2.md"
         );
         let tree = serde_json::json!({"tree": [
             {"path": "docs", "type": "tree"},
-            {"path": "docs/計画.md", "type": "blob"}
+            {"path": "docs/メモ.md", "type": "blob"}
         ]});
-        assert_eq!(paths_in_tree(&tree), vec!["docs/計画.md"]);
+        assert_eq!(paths_in_tree(&tree), vec!["docs/メモ.md"]);
     }
 }
