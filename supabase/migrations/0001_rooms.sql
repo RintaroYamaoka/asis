@@ -92,7 +92,11 @@ alter table public.room_repos   enable row level security;
 alter table public.room_members enable row level security;
 
 revoke all on public.rooms, public.room_repos, public.room_members from anon;
+-- 関数は、作っただけで誰でも呼べる。ログインしていない人から外す。
 revoke execute on function public.create_room(text, text) from public, anon;
+revoke execute on function public.github_id(), public.is_member(uuid), public.is_admin(uuid) from public, anon;
+revoke execute on function public.keep_one_admin() from public, anon, authenticated;
+grant execute on function public.github_id(), public.is_member(uuid), public.is_admin(uuid) to authenticated;
 grant select, update, delete         on public.rooms        to authenticated;
 grant select, insert, delete         on public.room_repos   to authenticated;
 grant select, insert, update, delete on public.room_members to authenticated;
