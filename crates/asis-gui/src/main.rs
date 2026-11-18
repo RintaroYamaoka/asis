@@ -664,7 +664,7 @@ fn pressable<'a>(
 }
 
 /// ボードのカードの高さ。全部 同じ大きさにする(PR がまだ無い issue の 1 枚も同じ)
-const CARD_H: f32 = 140.0;
+const CARD_H: f32 = 158.0;
 
 fn card_box<'a>(body: Element<'a, Msg>, line: Color, on: bool, msg: Msg) -> Element<'a, Msg> {
     mouse_area(
