@@ -105,6 +105,7 @@ impl Room {
         Project {
             name: self.name.clone(),
             repos: self.repos.clone(),
+            members: self.members.iter().map(|m| m.login.clone()).collect(),
             review: self.role(|m| m.review, false),
             merge: self.role(|m| m.merge, self.merge_by_author),
             deploy: self.role(|m| m.deploy, self.deploy_by_author),
@@ -764,6 +765,7 @@ mod tests {
         assert!(room.people("o/web").is_empty());
         let p = room.project();
         assert_eq!((p.name.as_str(), p.repos.len()), ("team", 2));
+        assert_eq!(p.members, vec!["Alice", "bob"]);
         assert_eq!(p.review, vec!["Alice"]);
         assert_eq!(p.merge, vec!["Alice"]);
         // 本番に出す役の人がいなくても、「出した本人」にしていればそれが入る

@@ -33,15 +33,15 @@ repo・メンバー・役割をまとめて人と共有するときは、部屋�
 
 GitHub の公式コマンド gh のログインを使います。読んだものは保存しません。";
 
-/// 何を見るか。読み直すたびに、定義ファイルも読み直す。
+/// 何を見るか。
 pub struct Source {
-    /// 定義を repo の中のファイルから読む repo
+    /// 1 つずつ、既定の決まりで見る repo
     pub watch: Vec<String>,
     /// repo ごとの絞り込み。その人たちの分だけを出す
     pub only: std::collections::BTreeMap<String, Vec<String>>,
     /// 手元の clone を探すフォルダ
     pub roots: Vec<std::path::PathBuf>,
-    /// 手元だけの定義
+    /// 手元だけの定義と、入っている部屋
     pub local: Vec<Project>,
 }
 

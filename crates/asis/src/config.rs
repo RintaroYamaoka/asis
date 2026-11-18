@@ -10,6 +10,8 @@ use std::path::PathBuf;
 pub struct Project {
     pub name: String,
     pub repos: Vec<String>,
+    /// 部屋のメンバー。確認する人が決まらないときに回す先。空なら、GitHub でその repo に書ける人
+    pub members: Vec<String>,
     /// 役割。GitHub のアカウント名か `author` の一覧。空なら既定(asis-core の Settings を参照)
     pub review: Vec<String>,
     pub merge: Vec<String>,
@@ -27,7 +29,7 @@ pub struct Local {
     pub roots: Vec<String>,
     /// repo ごとの絞り込み。その人たちの分だけを出す
     pub only: BTreeMap<String, Vec<String>>,
-    /// repo にファイルを置かない場合の、手元だけの定義
+    /// 手元だけの定義(`[[project]]`)。部屋を使わずに、repo をまとめて役割を決める
     pub projects: Vec<Project>,
     /// 部屋を置く DB。書かなければ、部屋を使わない
     pub db: Option<Db>,
@@ -106,6 +108,7 @@ fn project(raw: RawProject, home: Option<&str>) -> Result<Project, String> {
     Ok(Project {
         name,
         repos,
+        members: Vec::new(),
         review: raw.roles.review,
         merge: raw.roles.merge,
         deploy: raw.roles.deploy,

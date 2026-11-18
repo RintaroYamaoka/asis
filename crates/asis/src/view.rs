@@ -197,6 +197,7 @@ pub const LOOSE: &str = "タスクにつながっていない PR";
 pub const LOCAL: &str = "手元の作業(PR はまだ)";
 
 /// `only` が空でなければ、その人たちが出した PR と、その人たちのタスクだけを出す。
+/// ほかの人の PR でも、その人たちが GitHub で確認を頼まれていれば出す(番が来ているものを隠さない)。
 /// `works` は、この repo の、この PC の上の worktree。
 pub fn build(
     f: &RepoFacts,
@@ -206,8 +207,17 @@ pub fn build(
     now: i64,
 ) -> RepoView {
     let wanted = |who: &str| only.is_empty() || only.iter().any(|o| o == who);
+    // その PR を、出す人たちが出したか、出す人たちが確認を頼まれているか。
+    let wanted_pr =
+        |p: &PrFacts| wanted(&p.author) || p.requested_reviewers.iter().any(|r| wanted(r));
+    // 確認する人が決まらないときに回す先。部屋ならそのメンバー、部屋でなければ repo に書ける人。
+    let members = if project.members.is_empty() {
+        f.people.clone()
+    } else {
+        project.members.clone()
+    };
     let settings = Settings {
-        members: f.people.clone(),
+        members,
         review: project.review.clone(),
         merge: project.merge.clone(),
         deploy: project.deploy.clone(),
@@ -266,10 +276,10 @@ pub fn build(
         let local = local_for(&|b| numbered(b) || idx.iter().any(|i| open_branch(*i) == Some(b)));
         let has_branch = !local.is_empty() || f.branches.iter().any(|b| numbered(b));
         let t = judge_task(issue, &vs, has_branch);
-        // 起票した人・担当・つながる PR の作者のどれかが当たれば出す。
+        // 起票した人・担当・つながる PR の作者か確認を頼まれた人の、どれかが当たれば出す。
         let related = wanted(&issue.author)
             || issue.assignees.iter().any(|a| wanted(a))
-            || idx.iter().any(|i| wanted(&f.prs[*i].author));
+            || idx.iter().any(|i| wanted_pr(&f.prs[*i]));
         if !related {
             continue;
         }
@@ -308,10 +318,7 @@ pub fn build(
     let mut loose = Vec::new();
     for (i, p) in f.prs.iter().enumerate() {
         let v = &verdicts[i];
-        if claimed[i]
-            || !wanted(&p.author)
-            || matches!(v.state, PrState::Shipped | PrState::Withdrawn)
-        {
+        if claimed[i] || !wanted_pr(p) || matches!(v.state, PrState::Shipped | PrState::Withdrawn) {
             continue;
         }
         loose.push(Row {
@@ -511,6 +518,15 @@ pub(crate) mod tests {
 
     fn sample_full(only: &[&str], works: &[Work], bodies: &[(u64, &str)]) -> RepoView {
         let only: Vec<String> = only.iter().map(|s| s.to_string()).collect();
+        let project = Project {
+            name: "p".into(),
+            repos: vec!["o/r".into()],
+            ..Project::default()
+        };
+        build(&sample_facts(bodies), &project, &only, works, 1795005296)
+    }
+
+    fn sample_facts(bodies: &[(u64, &str)]) -> RepoFacts {
         let mut failing = pr(21, "ann", "fix");
         failing.checks = Checks::Failing(1);
         let mut shipped = pr(22, "ann", "old");
@@ -523,7 +539,7 @@ pub(crate) mod tests {
             prs.iter_mut().find(|p| p.number == *number).unwrap().body = body.to_string();
         }
         let n = prs.len();
-        let f = RepoFacts {
+        RepoFacts {
             repo: "o/r".into(),
             viewer: "bob".into(),
             pr_updated: vec!["2026-11-18T07:34:56Z".into(); n],
@@ -559,13 +575,7 @@ pub(crate) mod tests {
             no_deployments: false,
             people: vec!["ann".into(), "bob".into()],
             notes: vec![],
-        };
-        let project = Project {
-            name: "p".into(),
-            repos: vec!["o/r".into()],
-            ..Project::default()
-        };
-        build(&f, &project, &only, works, 1795005296)
+        }
     }
 
     fn rows<'a>(v: &'a RepoView, group: &str) -> Vec<&'a Row> {
@@ -704,6 +714,52 @@ pub(crate) mod tests {
         assert_eq!(labels(&sample_only(&["cat"])), vec!["#7"]);
         assert_eq!(labels(&sample_only(&["ann", "bob"])), labels(&sample()));
         assert!(labels(&sample_only(&["nobody"])).is_empty());
+    }
+
+    #[test]
+    fn only_keeps_prs_that_ask_the_named_people_to_review() {
+        // ann の PR #21 で bob が確認を頼まれている。bob の分だけを見ていても、#21 は隠さない
+        let mut f = sample_facts(&[]);
+        f.prs[1].checks = Checks::Passing;
+        f.prs[1].requested_reviewers = vec!["bob".into()];
+        let project = Project::default();
+        let v = build(&f, &project, &["bob".to_string()], &[], 1795005296);
+        let labels: Vec<&str> = v
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["#8", "?#21", "…#23"]);
+        assert!(v
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .any(|r| r.label == "?#21" && r.is_mine("bob")));
+    }
+
+    #[test]
+    fn review_falls_back_to_room_members_not_everyone_who_can_write() {
+        // GitHub では ann・bob・cat・dan が書ける。部屋のメンバーは ann と cat だけ
+        let mut f = sample_facts(&[]);
+        f.people = vec!["ann".into(), "bob".into(), "cat".into(), "dan".into()];
+        let turn = |project: &Project| {
+            let v = build(&f, project, &[], &[], 1795005296);
+            v.groups
+                .iter()
+                .flat_map(|g| g.rows.iter())
+                .find(|r| r.label == "#7")
+                .unwrap()
+                .turn
+                .clone()
+        };
+        // 部屋でなければ、作者(ann)以外の書ける人
+        assert_eq!(turn(&Project::default()), vec!["bob", "cat", "dan"]);
+        let room = Project {
+            members: vec!["ann".into(), "cat".into()],
+            ..Project::default()
+        };
+        assert_eq!(turn(&room), vec!["cat"]);
     }
 
     fn work(branch: &str, pane_status: Option<&str>) -> Work {
