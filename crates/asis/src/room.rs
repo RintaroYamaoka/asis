@@ -3,6 +3,7 @@
 //! DB に入れるのは部屋の定義だけ。issue・PR・コードは、今までどおり各自の PC が GitHub から読む。
 //! ログインは本人確認だけに使う。repo を読む鍵は DB に渡さない。
 use crate::config::{self, Db, Project};
+use crate::{lang, say};
 use asis_core::facts::AUTHOR;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -57,8 +58,12 @@ const ROOMS: &str = "/rest/v1/rooms?select=id,name,merge_by_author,deploy_by_aut
 room_repos(repo,everyone),room_members(github_id,login,is_admin,review,merge,deploy)&order=created_at";
 
 pub fn parse_rooms(text: &str) -> Result<Vec<Room>, String> {
-    let raw: Vec<RawRoom> =
-        serde_json::from_str(text).map_err(|e| format!("部屋の一覧を読めません: {e}"))?;
+    let raw: Vec<RawRoom> = serde_json::from_str(text).map_err(|e| {
+        say!(
+            "部屋の一覧を読めません: {e}",
+            "Cannot read the list of Rooms: {e}"
+        )
+    })?;
     Ok(raw
         .into_iter()
         .map(|r| {
@@ -129,8 +134,14 @@ pub fn find<'a>(rooms: &'a [Room], name: &str) -> Result<&'a Room, String> {
     let hits: Vec<&Room> = rooms.iter().filter(|r| r.name == name).collect();
     match hits.as_slice() {
         [one] => Ok(one),
-        [] => Err(format!("`{name}` という部屋はありません")),
-        _ => Err(format!("`{name}` という部屋が 2 つ以上あります")),
+        [] => Err(say!(
+            "`{name}` という部屋はありません",
+            "There is no Room named `{name}`"
+        )),
+        _ => Err(say!(
+            "`{name}` という部屋が 2 つ以上あります",
+            "There are two or more Rooms named `{name}`"
+        )),
     }
 }
 
@@ -157,7 +168,8 @@ fn challenge(verifier: &str) -> String {
 
 fn new_verifier() -> Result<String, String> {
     let mut bytes = [0u8; 32];
-    getrandom::fill(&mut bytes).map_err(|e| format!("乱数を作れません: {e}"))?;
+    getrandom::fill(&mut bytes)
+        .map_err(|e| say!("乱数を作れません: {e}", "Cannot make random bytes: {e}"))?;
     Ok(base64url(&bytes))
 }
 
@@ -187,7 +199,10 @@ fn parse_callback(request_line: &str) -> Result<String, String> {
     let query = target
         .strip_prefix("/callback")
         .and_then(|rest| rest.strip_prefix('?'))
-        .ok_or("ログインの戻りではない要求が来ました")?;
+        .ok_or(lang::t(
+            "ログインの戻りではない要求が来ました",
+            "A request came that is not the sign-in callback",
+        ))?;
     let get = |key: &str| {
         query
             .split('&')
@@ -200,8 +215,15 @@ fn parse_callback(request_line: &str) -> Result<String, String> {
         get("error_description").or_else(|| get("error")),
     ) {
         (Some(code), _) if !code.is_empty() => Ok(code),
-        (_, Some(error)) => Err(format!("ログインできませんでした: {error}")),
-        _ => Err("ログインの戻りに、受け取りの番号がありません".into()),
+        (_, Some(error)) => Err(say!(
+            "ログインできませんでした: {error}",
+            "Could not sign in: {error}"
+        )),
+        _ => Err(lang::t(
+            "ログインの戻りに、受け取りの番号がありません",
+            "The sign-in callback has no code",
+        )
+        .into()),
     }
 }
 
@@ -230,7 +252,13 @@ fn now() -> i64 {
 fn session_path() -> Result<PathBuf, String> {
     config::path()
         .map(|p| p.with_file_name("session.json"))
-        .ok_or_else(|| "設定の置き場が分かりません(HOME がありません)".to_string())
+        .ok_or_else(|| {
+            lang::t(
+                "設定の置き場が分かりません(HOME がありません)",
+                "Cannot find where the settings go (HOME is not set)",
+            )
+            .to_string()
+        })
 }
 
 fn save_session(session: &Session) -> Result<(), String> {
@@ -270,10 +298,12 @@ fn explain(status: u16, body: &str) -> String {
         .find_map(|k| v.get(k).and_then(|m| m.as_str()))
         .unwrap_or(body.trim());
     match v.get("code").and_then(|c| c.as_str()) {
-        Some("42501") if !text.contains("許可") => {
-            "その操作は、部屋の管理者だけができます".to_string()
-        }
-        Some("23505") => "もう入っています".to_string(),
+        Some("42501") if !text.contains("許可") => lang::t(
+            "その操作は、部屋の管理者だけができます",
+            "Only an Admin of the Room can do that",
+        )
+        .to_string(),
+        Some("23505") => lang::t("もう入っています", "Already added").to_string(),
         _ => format!("{text} (HTTP {status})"),
     }
 }
@@ -305,7 +335,8 @@ impl Http {
         prefer: Option<&str>,
     ) -> Result<String, String> {
         let url = format!("{}{path}", self.db.url);
-        let fail = |e: ureq::Error| format!("DB につながりません: {e}");
+        let fail =
+            |e: ureq::Error| say!("DB につながりません: {e}", "Cannot reach the database: {e}");
         let bearer = format!("Bearer {}", token.unwrap_or(&self.db.key));
         let mut response = match (method, body) {
             ("GET", _) => self
@@ -353,8 +384,12 @@ impl Http {
             Some(&body.to_string()),
             None,
         )?;
-        let mut session: Session =
-            serde_json::from_str(&text).map_err(|e| format!("ログインの返事を読めません: {e}"))?;
+        let mut session: Session = serde_json::from_str(&text).map_err(|e| {
+            say!(
+                "ログインの返事を読めません: {e}",
+                "Cannot read the sign-in reply: {e}"
+            )
+        })?;
         if session.expires_at == 0 {
             session.expires_at = now() + 3600;
         }
@@ -382,7 +417,10 @@ impl Client {
                     &serde_json::json!({ "refresh_token": session.refresh_token }),
                 )
                 .map_err(|e| {
-                    format!("ログインが切れました。`asis login` をやり直してください({e})")
+                    say!(
+                        "ログインが切れました。`asis login` をやり直してください({e})",
+                        "The sign-in expired. Sign in again ({e})"
+                    )
                 })?;
             save_session(&session)?;
         }
@@ -438,11 +476,16 @@ impl Client {
     pub fn create(&self, name: &str) -> Result<String, String> {
         let name = name.trim();
         if name.is_empty() {
-            return Err("部屋の名前がありません".into());
+            return Err(lang::t("部屋の名前がありません", "The Room name is empty").into());
         }
         let body = serde_json::json!({ "room_name": name }).to_string();
         let out = self.send("POST", "/rest/v1/rpc/create_room", Some(&body))?;
-        serde_json::from_str(&out).map_err(|_| format!("作った部屋の番号を読めません: {out}"))
+        serde_json::from_str(&out).map_err(|_| {
+            say!(
+                "作った部屋の番号を読めません: {out}",
+                "Cannot read the id of the new Room: {out}"
+            )
+        })
     }
 
     /// repo を足す。`everyone` なら、メンバーでない人の分も出す(足し直せば切り替わる)
@@ -452,7 +495,7 @@ impl Client {
         self.upsert("room_repos", "room_id,repo", &body)
             .map_err(|e| {
                 if e.contains("check") {
-                    format!("`{repo}` は owner/name の形ではありません")
+                    lang::not_repo(repo)
                 } else {
                     e
                 }
@@ -464,7 +507,10 @@ impl Client {
             "DELETE",
             &format!("/rest/v1/room_repos?room_id=eq.{room}&repo=eq.{repo}"),
             None,
-            &format!("`{repo}` は外せませんでした(入っていないか、管理者ではありません)"),
+            &say!(
+                "`{repo}` は外せませんでした(入っていないか、管理者ではありません)",
+                "Could not remove `{repo}` (it is not in the Room, or you are not an Admin)"
+            ),
         )
     }
 
@@ -487,7 +533,10 @@ impl Client {
             "PATCH",
             &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{github_id}"),
             Some(&body),
-            "変えられませんでした(管理者ではありません)",
+            lang::t(
+                "変えられませんでした(管理者ではありません)",
+                "Could not change it (you are not an Admin)",
+            ),
         )
     }
 
@@ -496,7 +545,10 @@ impl Client {
             "DELETE",
             &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{github_id}"),
             None,
-            "外せませんでした(管理者ではありません)",
+            lang::t(
+                "外せませんでした(管理者ではありません)",
+                "Could not remove them (you are not an Admin)",
+            ),
         )
     }
 
@@ -506,12 +558,17 @@ impl Client {
             .send("POST", "/rest/v1/rpc/github_id", Some("{}"))?
             .trim()
             .parse()
-            .map_err(|_| "自分の番号を読めません".to_string())?;
+            .map_err(|_| {
+                lang::t("自分の番号を読めません", "Cannot read your own id").to_string()
+            })?;
         self.changed(
             "DELETE",
             &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{me}"),
             None,
-            "出られませんでした(この部屋に入っていません)",
+            lang::t(
+                "出られませんでした(この部屋に入っていません)",
+                "Could not leave (you are not in this Room)",
+            ),
         )
     }
 
@@ -527,7 +584,10 @@ impl Client {
             "PATCH",
             &format!("/rest/v1/rooms?id=eq.{room}"),
             Some(&body),
-            "変えられませんでした(管理者ではありません)",
+            lang::t(
+                "変えられませんでした(管理者ではありません)",
+                "Could not change it (you are not an Admin)",
+            ),
         )
     }
 
@@ -536,7 +596,10 @@ impl Client {
             "DELETE",
             &format!("/rest/v1/rooms?id=eq.{room}"),
             None,
-            "消せませんでした(管理者ではありません)",
+            lang::t(
+                "消せませんでした(管理者ではありません)",
+                "Could not delete it (you are not an Admin)",
+            ),
         )
     }
 }
@@ -615,11 +678,18 @@ const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
 /// `show` には、ブラウザが開かないときに人が開く URL を渡す。
 pub fn sign_in(db: &Db, show: &dyn Fn(&str)) -> Result<(), String> {
     let http = Http::new(db);
-    let listener = std::net::TcpListener::bind(CALLBACK)
-        .map_err(|e| format!("ログインの戻りを受ける場所({CALLBACK})を開けません: {e}"))?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|e| format!("ログインの戻りを待てません: {e}"))?;
+    let listener = std::net::TcpListener::bind(CALLBACK).map_err(|e| {
+        say!(
+            "ログインの戻りを受ける場所({CALLBACK})を開けません: {e}",
+            "Cannot open the place for the sign-in callback ({CALLBACK}): {e}"
+        )
+    })?;
+    listener.set_nonblocking(true).map_err(|e| {
+        say!(
+            "ログインの戻りを待てません: {e}",
+            "Cannot wait for the sign-in callback: {e}"
+        )
+    })?;
     let deadline = std::time::Instant::now() + SIGN_IN_WAIT;
     let verifier = new_verifier()?;
     let url = format!(
@@ -636,9 +706,11 @@ pub fn sign_in(db: &Db, show: &dyn Fn(&str)) -> Result<(), String> {
             Ok((stream, _)) => stream,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if std::time::Instant::now() > deadline {
-                    return Err(
-                        "ログインを待ちきれませんでした。もう一度 Sign in してください".into(),
-                    );
+                    return Err(lang::t(
+                        "ログインを待ちきれませんでした。もう一度 Sign in してください",
+                        "Gave up waiting for the sign-in. Sign in again",
+                    )
+                    .into());
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));
                 continue;
@@ -658,7 +730,11 @@ pub fn sign_in(db: &Db, show: &dyn Fn(&str)) -> Result<(), String> {
             )
         });
         let message = match &result {
-            Ok(_) => "ログインしました。この画面は閉じて大丈夫です。".to_string(),
+            Ok(_) => lang::t(
+                "ログインしました。この画面は閉じて大丈夫です。",
+                "Signed in. You can close this page.",
+            )
+            .to_string(),
             Err(e) => e.clone(),
         };
         let page = format!("{DONE_PAGE}{message}</p>");
@@ -684,8 +760,9 @@ pub fn sign_out() -> Result<bool, String> {
 /// GitHub のアカウント名から、番号と正しい大文字小文字の名前を聞く。`gh` のログインを借りる。
 fn github_user(login: &str) -> Result<(i64, String), String> {
     if !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || login.is_empty() {
-        return Err(format!(
-            "`{login}` は GitHub のアカウント名の形ではありません"
+        return Err(say!(
+            "`{login}` は GitHub のアカウント名の形ではありません",
+            "`{login}` is not a GitHub account name"
         ));
     }
     let out = std::process::Command::new("gh")
@@ -696,15 +773,20 @@ fn github_user(login: &str) -> Result<(i64, String), String> {
             "[.id, .login] | @tsv",
         ])
         .output()
-        .map_err(|e| format!("gh を動かせません: {e}"))?;
+        .map_err(lang::no_gh)?;
     let text = String::from_utf8_lossy(&out.stdout);
     match text.trim().split_once('\t') {
-        Some((id, name)) if out.status.success() => id
-            .parse()
-            .map(|id| (id, name.to_string()))
-            .map_err(|_| format!("`{login}` の番号を読めません")),
-        _ => Err(format!(
-            "GitHub に `{login}` というアカウントが見つかりません"
+        Some((id, name)) if out.status.success() => {
+            id.parse().map(|id| (id, name.to_string())).map_err(|_| {
+                say!(
+                    "`{login}` の番号を読めません",
+                    "Cannot read the id of `{login}`"
+                )
+            })
+        }
+        _ => Err(say!(
+            "GitHub に `{login}` というアカウントが見つかりません",
+            "There is no GitHub account named `{login}`"
         )),
     }
 }
@@ -779,16 +861,22 @@ pub fn rooms_text(rooms: &[Room]) -> String {
 
 fn need_db() -> Result<Db, String> {
     config::load()?.db.ok_or_else(|| {
-        format!(
-            "部屋を置く DB が設定にありません。{} に次を書いてください。\n\n[db]\nurl = \"https://….supabase.co\"\nkey = \"公開用の鍵\"",
-            config::path().map(|p| p.display().to_string()).unwrap_or_default()
+        let path = config::path().map(|p| p.display().to_string()).unwrap_or_default();
+        say!(
+            "部屋を置く DB が設定にありません。{path} に次を書いてください。\n\n[db]\nurl = \"https://….supabase.co\"\nkey = \"公開用の鍵\"",
+            "There is no database for Rooms in the settings. Write this in {path}.\n\n[db]\nurl = \"https://….supabase.co\"\nkey = \"public key\""
         )
     })
 }
 
 fn client() -> Result<Client, String> {
-    Client::open(&need_db()?)?
-        .ok_or_else(|| "ログインしていません。`asis login` をしてください".to_string())
+    Client::open(&need_db()?)?.ok_or_else(|| {
+        lang::t(
+            "ログインしていません。`asis login` をしてください",
+            "You are not signed in. Run `asis login`",
+        )
+        .to_string()
+    })
 }
 
 /// `asis login` / `asis logout` / `asis room ...`

@@ -93,7 +93,7 @@ fn check_repo(repo: &str) -> Result<(), String> {
         Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
             Ok(())
         }
-        _ => Err(format!("`{repo}` は owner/name の形ではありません")),
+        _ => Err(crate::lang::not_repo(repo)),
     }
 }
 
@@ -109,9 +109,12 @@ fn project(raw: RawProject, home: Option<&str>) -> Result<Project, String> {
     let name = raw
         .name
         .or_else(|| home.map(str::to_string))
-        .ok_or("name がありません")?;
+        .ok_or(crate::lang::t("name がありません", "name is missing"))?;
     if repos.is_empty() {
-        return Err(format!("プロジェクト `{name}` に repos がありません"));
+        return Err(crate::say!(
+            "プロジェクト `{name}` に repos がありません",
+            "Project `{name}` has no repos"
+        ));
     }
     Ok(Project {
         name,
@@ -151,15 +154,26 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
         .as_ref()
         .is_some_and(|db| !db.url.starts_with("https://"))
     {
-        return Err("[db] の url は https:// で始めてください".into());
+        return Err(crate::lang::t(
+            "[db] の url は https:// で始めてください",
+            "The url in [db] must start with https://",
+        )
+        .into());
     }
     if let Some(c) = &raw.accent {
         if parse_color(c).is_none() {
-            return Err(format!("accent は `#rrggbb` の形で書いてください: `{c}`"));
+            return Err(crate::say!(
+                "accent は `#rrggbb` の形で書いてください: `{c}`",
+                "Write accent in the form `#rrggbb`: `{c}`"
+            ));
         }
     }
     if raw.lang.as_deref().is_some_and(|l| l != "ja" && l != "en") {
-        return Err("lang は `ja` か `en` で書いてください".into());
+        return Err(crate::lang::t(
+            "lang は `ja` か `en` で書いてください",
+            "Write lang as `ja` or `en`",
+        )
+        .into());
     }
     Ok(Local {
         watch: raw.watch,
@@ -200,11 +214,14 @@ fn read(path: &PathBuf) -> Result<String, String> {
 }
 
 /// 設定ファイルが無ければ空。読めない・形が違うときはエラー。
+/// 手元の設定を読む。説明の文の言葉(`lang`)も、ここで決める
 pub fn load() -> Result<Local, String> {
     let Some(path) = path() else {
         return Ok(Local::default());
     };
-    parse_local(&read(&path)?).map_err(|e| format!("{}: {e}", path.display()))
+    let local = parse_local(&read(&path)?).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::lang::set(local.lang.as_deref() == Some("en"));
+    Ok(local)
 }
 
 /// `watch` の行だけを書き換えた設定ファイルの中身を返す。ほかの行(手元の定義やコメント)は触らない。
@@ -218,7 +235,11 @@ pub fn with_watch(text: &str, watch: &[String]) -> Result<String, String> {
         .lines()
         .any(|l| is_watch(l) && !l.trim_end().ends_with(']'))
     {
-        return Err("watch が複数行で書かれています。設定ファイルを手で直してください".into());
+        return Err(crate::lang::t(
+            "watch が複数行で書かれています。設定ファイルを手で直してください",
+            "watch spans several lines. Fix the settings file by hand",
+        )
+        .into());
     }
     let rest: Vec<&str> = text.lines().filter(|l| !is_watch(l)).collect();
     let line = format!(
@@ -335,11 +356,15 @@ pub fn with_value(text: &str, key: &str, value: Option<&str>) -> String {
 /// `[db]` の表だけを書き換えた中身を返す。
 pub fn with_db(text: &str, db: &Db) -> Result<String, String> {
     if !db.url.starts_with("https://") {
-        return Err("DB の URL は https:// で始めてください".into());
+        return Err(crate::lang::t(
+            "DB の URL は https:// で始めてください",
+            "The database URL must start with https://",
+        )
+        .into());
     }
     let plain = |s: &str| !s.is_empty() && !s.contains(['"', '\\', '\n']);
     if !plain(&db.url) || !plain(&db.key) {
-        return Err("DB の URL と鍵を、空にせず、記号の \" \\ を入れずに書いてください".into());
+        return Err(crate::lang::t("DB の URL と鍵を、空にせず、記号の \" \\ を入れずに書いてください", "Write the database URL and key without leaving them empty and without the characters \" \\").into());
     }
     let mut out: Vec<&str> = Vec::new();
     let mut inside = false;
@@ -367,15 +392,22 @@ pub fn with_db(text: &str, db: &Db) -> Result<String, String> {
 
 /// 設定ファイルの中身を、読めることを確かめてから書く。
 pub fn save(change: impl FnOnce(&str) -> Result<String, String>) -> Result<Local, String> {
-    let path = path().ok_or("設定ファイルの置き場が分かりません(HOME がありません)")?;
+    let path = path().ok_or(crate::lang::t(
+        "設定ファイルの置き場が分かりません(HOME がありません)",
+        "Cannot find where the settings file goes (HOME is not set)",
+    ))?;
     let next = change(&read(&path)?)?;
     let local = parse_local(&next).map_err(|e| {
-        format!("書き換えた設定を読めません({e})。設定ファイルを手で直してください")
+        crate::say!(
+            "書き換えた設定を読めません({e})。設定ファイルを手で直してください",
+            "Cannot read the changed settings ({e}). Fix the settings file by hand"
+        )
     })?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     std::fs::write(&path, next).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::lang::set(local.lang.as_deref() == Some("en"));
     Ok(local)
 }
 

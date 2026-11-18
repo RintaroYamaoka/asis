@@ -5,6 +5,7 @@ pub mod act;
 pub mod config;
 pub mod extra;
 pub mod github;
+pub mod lang;
 pub mod local;
 pub mod room;
 pub mod tui;
@@ -78,7 +79,9 @@ pub fn run() -> Result<(), String> {
             "--plain" => plain = true,
             "--mine" => filter = Filter::Mine,
             "--only" => {
-                let names = args.next().ok_or("--only に名前がありません")?;
+                let names = args
+                    .next()
+                    .ok_or(lang::t("--only に名前がありません", "--only needs names"))?;
                 only.extend(
                     names
                         .split(',')
@@ -87,13 +90,21 @@ pub fn run() -> Result<(), String> {
                         .map(str::to_string),
                 );
             }
-            _ if a.starts_with('-') => return Err(format!("知らない指定です: {a}\n\n{HELP}")),
+            _ if a.starts_with('-') => {
+                return Err(say!(
+                    "知らない指定です: {a}\n\n{HELP}",
+                    "Unknown option: {a}\n\n{HELP}"
+                ))
+            }
             _ => repos.push(a),
         }
     }
     if let Some(cmd @ ("add" | "remove")) = repos.first().map(String::as_str) {
         let [_, repo] = repos.as_slice() else {
-            return Err(format!("asis {cmd} <owner/repo> の形で指定してください"));
+            return Err(say!(
+                "asis {cmd} <owner/repo> の形で指定してください",
+                "Use the form asis {cmd} <owner/repo>"
+            ));
         };
         let local = config::edit_watch(repo, cmd == "add", &only)?;
         if local.watch.is_empty() {
@@ -142,7 +153,10 @@ pub fn run() -> Result<(), String> {
             .inspect(|e| eprintln!("{e}"))
             .count();
         return if failed > 0 {
-            Err(format!("{failed} 個の repo を読めませんでした"))
+            Err(say!(
+                "{failed} 個の repo を読めませんでした",
+                "Could not read {failed} repos"
+            ))
         } else {
             Ok(())
         };
@@ -203,7 +217,13 @@ pub fn default_source(only_flag: &[String]) -> Result<Source, String> {
     let rooms = match read_rooms(&local) {
         Rooms::Read(rooms) => rooms,
         Rooms::Failed(e) => {
-            eprintln!("部屋を読めませんでした: {e}");
+            eprintln!(
+                "{}",
+                say!(
+                    "部屋を読めませんでした: {e}",
+                    "Could not read the Rooms: {e}"
+                )
+            );
             Vec::new()
         }
         Rooms::NoDb | Rooms::SignedOut => Vec::new(),
@@ -338,7 +358,7 @@ impl Loader {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let stopped = || "読み込みが途中で止まりました".to_string();
+        let stopped = lang::stopped;
         let force = force || self.last_full.is_none_or(|t| t.elapsed() > FULL_EVERY);
         if force {
             self.last_full = Some(Instant::now());
@@ -486,9 +506,13 @@ impl Loader {
                                         let lone = extra::branches_without_pr(&f.branches, &heads);
                                         (r.tasks(files, &titles, &lone), None)
                                     }
-                                    (Some(_), Some((_, Err(e)))) => {
-                                        (vec![], Some(format!("docs を読めませんでした: {e}")))
-                                    }
+                                    (Some(_), Some((_, Err(e)))) => (
+                                        vec![],
+                                        Some(say!(
+                                            "docs を読めませんでした: {e}",
+                                            "Could not read the docs: {e}"
+                                        )),
+                                    ),
                                     _ => (vec![], None),
                                 };
                                 let mut v = view::build(f, p, only, &mine, &tasks, now);

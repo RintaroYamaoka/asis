@@ -195,9 +195,7 @@ impl std::fmt::Debug for Msg {
 fn load(loader: Arc<Mutex<Option<Loader>>>, force: bool) -> Task<Msg> {
     Task::perform(
         async move {
-            let mut guard = loader
-                .lock()
-                .map_err(|_| "読み込みが途中で止まりました".to_string())?;
+            let mut guard = loader.lock().map_err(|_| asis::lang::stopped())?;
             // `asis-gui owner/repo` と打てば、その repo だけを既定の決まりで開く
             let repos: Vec<String> = std::env::args().skip(1).collect();
             let rooms = if repos.is_empty() {
@@ -499,6 +497,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 Ok(_) => {
                     app.english = english;
                     app.notice = None;
+                    // 注記を新しい言葉で作り直す(読んだ事実は手元にあるので、GitHub には聞き直さない)
+                    return load(app.loader.clone(), false);
                 }
                 Err(e) => app.notice = Some((e, false)),
             }
@@ -692,14 +692,20 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
 
 /// 部屋を変える操作を、DB に送る。作ったときは `created:<番号>`、自分が居なくなる操作は `gone` を返す
 fn run_op(op: Op) -> Result<String, String> {
+    use asis::{lang::t, say};
     let local = asis::config::load()?;
-    let db = local.db.ok_or("部屋を置く DB が設定にありません")?;
-    let c = asis::room::Client::open(&db)?.ok_or("Sign in していません")?;
+    let db = local.db.ok_or(t(
+        "部屋を置く DB が設定にありません",
+        "There is no database for Rooms in the settings",
+    ))?;
+    let c =
+        asis::room::Client::open(&db)?.ok_or(t("Sign in していません", "You are not signed in"))?;
     Ok(match op {
         Op::Create(name) => format!("created:{}", c.create(&name)?),
         Op::AddRepo(room, repo) => {
             c.add_repo(&room, &repo, false)?;
-            format!("{} を足しました", repo.trim())
+            let repo = repo.trim();
+            say!("{repo} を足しました", "Added {repo}")
         }
         Op::Everyone(room, repo, on) => {
             c.add_repo(&room, &repo, on)?;
@@ -707,9 +713,12 @@ fn run_op(op: Op) -> Result<String, String> {
         }
         Op::DropRepo(room, repo) => {
             c.drop_repo(&room, &repo)?;
-            format!("{repo} を外しました")
+            say!("{repo} を外しました", "Removed {repo}")
         }
-        Op::Invite(room, login) => format!("{} を Invite しました", c.invite(&room, &login, &[])?),
+        Op::Invite(room, login) => {
+            let login = c.invite(&room, &login, &[])?;
+            say!("{login} を Invite しました", "Invited {login}")
+        }
         Op::Role(room, id, role, on) => {
             c.set_role(&room, id, role, on)?;
             String::new()

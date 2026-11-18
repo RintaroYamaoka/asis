@@ -73,7 +73,7 @@ fn gh(args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("gh")
         .args(args)
         .output()
-        .map_err(|e| format!("gh を実行できません({e})"))?;
+        .map_err(crate::lang::no_gh)?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -101,7 +101,12 @@ pub fn fetch_files(
         "api",
         &format!("repos/{repo}/git/trees/{oid}?recursive=1"),
     ])?)
-    .map_err(|e| format!("ファイルの一覧を読めません({e})"))?;
+    .map_err(|e| {
+        crate::say!(
+            "ファイルの一覧を読めません({e})",
+            "Cannot read the list of files ({e})"
+        )
+    })?;
     let mut out = Vec::new();
     for path in paths_in_tree(&tree).into_iter().filter(|p| wants(p)) {
         let body = gh(&[

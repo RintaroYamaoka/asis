@@ -2,6 +2,7 @@
 //!
 //! 操作がやるのは、GitHub の上の事実を作ることだけ(issue ができる・承認が付く・取り込まれる)。
 //! 状態は、その事実から今までどおり決まる。ここから状態を直接 変えることはできない。
+use crate::{lang, say};
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +34,7 @@ fn check_repo(repo: &str) -> Result<(), String> {
     };
     match repo.split_once('/') {
         Some((owner, name)) if ok(owner) && ok(name) => Ok(()),
-        _ => Err(format!("`{repo}` は owner/name の形ではありません")),
+        _ => Err(lang::not_repo(repo)),
     }
 }
 
@@ -52,7 +53,7 @@ impl Action {
             Action::WriteIssue { repo, title, body } => {
                 check_repo(repo)?;
                 if title.trim().is_empty() {
-                    return Err("題がありません".into());
+                    return Err(lang::t("題がありません", "The title is empty").into());
                 }
                 Ok(post(
                     format!("repos/{repo}/issues"),
@@ -73,7 +74,11 @@ impl Action {
             } => {
                 check_repo(repo)?;
                 if comment.trim().is_empty() {
-                    return Err("何を直すかを、一言 書いてください".into());
+                    return Err(lang::t(
+                        "何を直すかを、一言 書いてください",
+                        "Write a word on what to fix",
+                    )
+                    .into());
                 }
                 Ok(post(
                     format!("repos/{repo}/pulls/{number}/reviews"),
@@ -83,7 +88,10 @@ impl Action {
             Action::Merge { repo, number } => {
                 check_repo(repo)?;
                 if !["merge", "squash", "rebase"].contains(&merge_method) {
-                    return Err(format!("取り込み方が分かりません: `{merge_method}`"));
+                    return Err(say!(
+                        "取り込み方が分かりません: `{merge_method}`",
+                        "Unknown merge method: `{merge_method}`"
+                    ));
                 }
                 Ok(vec![
                     "api".into(),
@@ -129,11 +137,23 @@ fn explain(stderr: &str, stdout: &str) -> String {
         });
     let text = message.unwrap_or_else(|| stderr.trim().to_string());
     if text.contains("approve your own pull request") {
-        "自分の PR は、自分では Approve できません".into()
+        lang::t(
+            "自分の PR は、自分では Approve できません",
+            "You cannot Approve your own PR",
+        )
+        .into()
     } else if text.contains("request changes on your own pull request") {
-        "自分の PR には、Request changes できません".into()
+        lang::t(
+            "自分の PR には、Request changes できません",
+            "You cannot Request changes on your own PR",
+        )
+        .into()
     } else if text.contains("not mergeable") || text.contains("Merge conflict") {
-        "いまは Merge できません(conflict があるか、条件を満たしていません)".into()
+        lang::t(
+            "いまは Merge できません(conflict があるか、条件を満たしていません)",
+            "Cannot Merge now (there is a conflict, or the requirements are not met)",
+        )
+        .into()
     } else {
         text
     }
@@ -143,7 +163,7 @@ fn gh(args: &[String]) -> Result<String, String> {
     let out = Command::new("gh")
         .args(args)
         .output()
-        .map_err(|e| format!("gh を実行できません({e})"))?;
+        .map_err(lang::no_gh)?;
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     if out.status.success() {
         Ok(stdout)
@@ -167,8 +187,7 @@ fn merge_method(repo: &str) -> Result<String, String> {
         "-f".into(),
         format!("n={name}"),
     ])?;
-    let v: serde_json::Value =
-        serde_json::from_str(&reply).map_err(|e| format!("返事を読めません({e})"))?;
+    let v: serde_json::Value = serde_json::from_str(&reply).map_err(lang::bad_reply)?;
     Ok(v["data"]["repository"]["viewerDefaultMergeMethod"]
         .as_str()
         .unwrap_or("MERGE")

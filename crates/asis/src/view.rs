@@ -308,10 +308,7 @@ pub fn build(
             turn: t.turn,
             age: age(newest, now),
             why: if t.mismatch {
-                format!(
-                    "{}(issue は閉じているが PR が残っている)",
-                    task_label(t.state)
-                )
+                format!("{} · issue closed, PR still open", task_label(t.state))
             } else {
                 task_label(t.state).to_string()
             },
@@ -445,9 +442,15 @@ pub fn build(
         only: only.to_vec(),
         notes: f
             .no_deployments
-            .then(|| "本番デプロイの記録が無いので、取り込みを本番として扱っています".to_string())
+            .then(|| {
+                crate::lang::t(
+                    "本番デプロイの記録が無いので、取り込みを本番として扱っています",
+                    "There is no record of production deploys, so a merge counts as deployed",
+                )
+                .to_string()
+            })
             .into_iter()
-            .chain(f.notes.iter().cloned())
+            .chain(f.notes.iter().map(|c| c.text()))
             .collect(),
         groups,
     }
@@ -795,7 +798,7 @@ pub(crate) mod tests {
             .flat_map(|g| g.rows.iter())
             .find(|r| r.label == "#9")
             .unwrap();
-        assert!(row.why.contains("issue は閉じているが PR が残っている"));
+        assert!(row.why.contains("issue closed, PR still open"));
         assert_eq!(
             rows(&v, LOOSE)
                 .iter()

@@ -1,5 +1,6 @@
 //! GitHub を読んで、事実の形にする。判断はしない(判断は asis-core)。
 //! 認証は GitHub の公式コマンド `gh` のログインを借りる。
+use crate::{lang, say};
 use asis_core::facts::*;
 use serde_json::Value;
 use std::process::Command;
@@ -58,7 +59,7 @@ pub struct RepoFacts {
     /// repo で動ける人(担当にできる人)。読めなければ、PR を出したことのある人(bot を除く)
     pub people: Vec<String>,
     /// 読み切れなかったことの注記。黙って欠けさせない
-    pub notes: Vec<String>,
+    pub notes: Vec<Cut>,
 }
 
 impl RepoFacts {
@@ -71,23 +72,25 @@ impl RepoFacts {
 }
 
 pub fn fetch(repo: &str, ignore_checks: &[String]) -> Result<RepoFacts, String> {
-    let (owner, name) = repo
-        .split_once('/')
-        .ok_or_else(|| format!("`{repo}` は owner/name の形ではありません"))?;
+    let (owner, name) = repo.split_once('/').ok_or_else(|| lang::not_repo(repo))?;
     // 2 本を同時に聞く。
     let (open, rest) = std::thread::scope(|s| {
         let rest = s.spawn(|| ask(REST_QUERY, owner, name));
         (
             ask(OPEN_QUERY, owner, name),
-            rest.join()
-                .unwrap_or_else(|_| Err("読み込みが途中で止まりました".into())),
+            rest.join().unwrap_or_else(|_| Err(lang::stopped())),
         )
     });
     let (mut v, rest) = (
         open.map_err(|e| format!("{repo}: {e}"))?,
         rest.map_err(|e| format!("{repo}: {e}"))?,
     );
-    let missing = || format!("{repo}: リポジトリが見つからないか、読む権限がありません");
+    let missing = || {
+        say!(
+            "{repo}: リポジトリが見つからないか、読む権限がありません",
+            "{repo}: the repository does not exist, or you cannot read it"
+        )
+    };
     let target = v["data"]["repository"]
         .as_object_mut()
         .ok_or_else(missing)?;
@@ -95,6 +98,31 @@ pub fn fetch(repo: &str, ignore_checks: &[String]) -> Result<RepoFacts, String> 
         target.insert(k.clone(), val.clone());
     }
     parse(&v, ignore_checks).ok_or_else(missing)
+}
+
+/// 読み切れなかったもの(注記の言葉は、出すときに決める)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cut {
+    /// 開いている PR が 100 本以上
+    OpenPrs,
+    /// 取り込み済みは新しい 40 本だけ読んでいて、それより前に本番に出ていないものが有りうる
+    MergedPrs,
+}
+
+impl Cut {
+    pub fn text(self) -> String {
+        match self {
+            Cut::OpenPrs => lang::t(
+                "開いている PR が 100 本以上あります。新しく動いた 100 本だけを出しています",
+                "There are 100 or more open PRs. Only the 100 most recently updated are shown",
+            ),
+            Cut::MergedPrs => lang::t(
+                "取り込み済みは新しい 40 本だけを読んでいます。それより前に取り込んで本番に出ていない PR は出ていません",
+                "Only the 40 most recent merged PRs are read. PRs merged before them and not yet deployed are not shown",
+            ),
+        }
+        .to_string()
+    }
 }
 
 /// gh が使えるかどうか
@@ -114,7 +142,7 @@ pub enum Gh {
 pub fn gh_state(ran: Result<(bool, String, String), std::io::ErrorKind>) -> Gh {
     match ran {
         Err(std::io::ErrorKind::NotFound) => Gh::Missing,
-        Err(e) => Gh::Failed(format!("gh を動かせません: {e}")),
+        Err(e) => Gh::Failed(lang::no_gh(e)),
         Ok((true, out, _)) if !out.trim().is_empty() => Gh::Ready(out.trim().to_string()),
         Ok((_, _, err)) if err.contains("auth login") || err.contains("not logged") => {
             Gh::SignedOut
@@ -144,11 +172,11 @@ fn ask(query: &str, owner: &str, name: &str) -> Result<Value, String> {
     let out = Command::new("gh")
         .args(["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}")])
         .output()
-        .map_err(|e| format!("gh を実行できません({e})。GitHub の公式コマンド gh を入れて `gh auth login` してください"))?;
+        .map_err(|e| say!("gh を実行できません({e})。GitHub の公式コマンド gh を入れて `gh auth login` してください", "Cannot run gh ({e}). Install GitHub's official command gh and run `gh auth login`"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    serde_json::from_slice(&out.stdout).map_err(|e| format!("返事を読めません({e})"))
+    serde_json::from_slice(&out.stdout).map_err(lang::bad_reply)
 }
 
 fn s(v: &Value) -> String {
@@ -298,10 +326,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
 
     let mut notes = Vec::new();
     if nodes(&r["open"]).count() >= 100 {
-        notes.push(
-            "開いている PR が 100 本以上あります。新しく動いた 100 本だけを出しています"
-                .to_string(),
-        );
+        notes.push(Cut::OpenPrs);
     }
     // 読んだ中でいちばん古い取り込みが、まだ本番に出ていない = それより前にも、出ていないものが有りうる。
     let merged: Vec<&PrFacts> = prs
@@ -309,7 +334,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
         .filter(|p| p.lifecycle == Lifecycle::Merged)
         .collect();
     if !production.is_empty() && merged.len() >= 40 && merged.last().is_some_and(|p| !p.shipped) {
-        notes.push("取り込み済みは新しい 40 本だけを読んでいます。それより前に取り込んで本番に出ていない PR は出ていません".to_string());
+        notes.push(Cut::MergedPrs);
     }
 
     Some(RepoFacts {
@@ -331,11 +356,12 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
 pub fn stamps(repos: &[String]) -> Result<Vec<String>, String> {
     let mut query = String::from("{");
     for (i, repo) in repos.iter().enumerate() {
-        let (owner, name) = repo
-            .split_once('/')
-            .ok_or_else(|| format!("`{repo}` は owner/name の形ではありません"))?;
+        let (owner, name) = repo.split_once('/').ok_or_else(|| lang::not_repo(repo))?;
         if repo.contains(['"', '\\']) {
-            return Err(format!("`{repo}` に使えない文字があります"));
+            return Err(say!(
+                "`{repo}` に使えない文字があります",
+                "`{repo}` has characters that cannot be used"
+            ));
         }
         query.push_str(&format!(
             r#"r{i}: repository(owner:"{owner}",name:"{name}"){{pushedAt pullRequests(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} issues(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} deployments(last:1){{nodes{{createdAt latestStatus{{state}}}}}} defaultBranchRef{{target{{oid}}}}}}"#
@@ -345,10 +371,9 @@ pub fn stamps(repos: &[String]) -> Result<Vec<String>, String> {
     let out = Command::new("gh")
         .args(["api", "graphql", "-f", &format!("query={query}")])
         .output()
-        .map_err(|e| format!("gh を実行できません({e})"))?;
+        .map_err(lang::no_gh)?;
     // 読めない repo が混ざると全体は失敗の印で返るが、読めた分の中身は入っているので、そのまま使う。
-    let v: Value =
-        serde_json::from_slice(&out.stdout).map_err(|e| format!("返事を読めません({e})"))?;
+    let v: Value = serde_json::from_slice(&out.stdout).map_err(lang::bad_reply)?;
     if v["data"].is_null() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
@@ -675,14 +700,14 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(f.notes[0].contains("100 本以上"));
+        assert_eq!(f.notes, vec![Cut::OpenPrs]);
         // 読んだ中でいちばん古い取り込みが、まだ本番に出ていない
         let deps = json!([{"environment": "Production", "latestStatus": {"state": "SUCCESS"}, "commit": {"oid": "x", "committedDate": "2026-03-01T00:00:00Z"}}]);
         let unshipped: Vec<Value> = (0..40)
             .map(|_| pr(json!({"state": "MERGED", "mergedAt": "2026-03-02T00:00:00Z"})))
             .collect();
         let f = parse(&repo(vec![], unshipped, deps.clone()), &[]).unwrap();
-        assert!(f.notes[0].contains("40 本"));
+        assert_eq!(f.notes, vec![Cut::MergedPrs]);
         let mut mixed: Vec<Value> = (0..39)
             .map(|_| pr(json!({"state": "MERGED", "mergedAt": "2026-03-02T00:00:00Z"})))
             .collect();
