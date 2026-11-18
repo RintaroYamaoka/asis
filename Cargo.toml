@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/asis-core", "crates/asis"]
+members = ["crates/asis-core", "crates/asis", "crates/asis-gui"]
 
 [profile.release]
 opt-level = "z"

@@ -1,0 +1,11 @@
+[package]
+name = "asis-gui"
+version = "0.1.0"
+edition = "2021"
+description = "development, as is — 窓の画面"
+license = "MIT"
+
+[dependencies]
+asis = { path = "../asis" }
+# GPU を使わず CPU で描く(tiny-skia)。GPU で描くと、同じ画面でメモリが 10 倍以上になる。
+iced = { version = "0.14", default-features = false, features = ["tiny-skia", "thread-pool", "x11", "wayland", "crisp"] }
