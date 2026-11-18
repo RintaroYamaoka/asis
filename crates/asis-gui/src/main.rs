@@ -7,7 +7,9 @@
 use asis::view::{Filter, Kind, RepoView, Row, Stage};
 use asis::{Loader, Section};
 use iced::keyboard::{self, key::Named, Key as KeyCode};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Space};
+use iced::widget::{
+    button, column, container, mouse_area, opaque, responsive, row, scrollable, stack, text, Space,
+};
 use iced::{Alignment, Border, Color, Element, Font, Length, Subscription, Task, Theme};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -33,6 +35,8 @@ struct App {
     filter: Filter,
     look: Look,
     selected: Option<Key>,
+    /// 選んだ 1 件の中身を、前に大きく出しているか
+    open: bool,
     loading: bool,
     synced: Option<Instant>,
     error: Option<String>,
@@ -47,6 +51,7 @@ enum Msg {
     Filter(Filter),
     Look(Look),
     Select(Key),
+    Close,
     Open(String),
     Refresh,
     Again,
@@ -91,6 +96,7 @@ fn boot() -> (App, Task<Msg>) {
         filter: Filter::All,
         look: Look::Board,
         selected: None,
+        open: false,
         loading: true,
         synced: None,
         error: None,
@@ -110,6 +116,12 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                         app.room = Some(0);
                     }
                     app.sections = sections;
+                    // 作るとき用:最初の 1 件の中身を出した状態で開く(画面を撮って確かめるため)
+                    #[cfg(debug_assertions)]
+                    if app.synced.is_none() && std::env::var_os("ASIS_OPEN_FIRST").is_some() {
+                        step(app, 1);
+                        app.open = app.selected.is_some();
+                    }
                     app.synced = Some(Instant::now());
                     app.error = None;
                     if app.room.is_some_and(|i| i >= app.sections.len()) {
@@ -133,11 +145,16 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             app.room = room;
             app.repo = None;
             app.selected = None;
+            app.open = false;
         }
         Msg::Repo(repo) => app.repo = repo,
         Msg::Filter(f) => app.filter = f,
         Msg::Look(look) => app.look = look,
-        Msg::Select(key) => app.selected = Some(key),
+        Msg::Select(key) => {
+            app.selected = Some(key);
+            app.open = true;
+        }
+        Msg::Close => app.open = false,
         Msg::Open(url) => open(&url),
         Msg::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
             if modifiers.control() || modifiers.alt() || modifiers.logo() {
@@ -145,11 +162,21 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             }
             match key.as_ref() {
                 KeyCode::Named(Named::Tab) => app.filter = app.filter.next(),
-                KeyCode::Named(Named::Escape) => app.selected = None,
+                // 中身を出していれば閉じる。出していなければ、選ぶのをやめる
+                KeyCode::Named(Named::Escape) => {
+                    if app.open {
+                        app.open = false;
+                    } else {
+                        app.selected = None;
+                    }
+                }
                 KeyCode::Named(Named::ArrowDown) => step(app, 1),
                 KeyCode::Named(Named::ArrowUp) => step(app, -1),
+                // 1 回目で中身を出す。出ているときは GitHub を開く
                 KeyCode::Named(Named::Enter) => {
-                    if let Some(url) = current(app).map(|(_, r)| r.url.clone()) {
+                    if !app.open {
+                        app.open = app.selected.is_some();
+                    } else if let Some(url) = current(app).map(|(_, r)| r.url.clone()) {
                         if !url.is_empty() {
                             open(&url);
                         }
@@ -516,13 +543,108 @@ fn card<'a>(app: &App, v: &'a RepoView, r: &'a Row, wide: bool) -> Element<'a, M
     area.into()
 }
 
-fn view(app: &App) -> Element<'_, Msg> {
-    let all = items(app);
-    let shown: Vec<Item<'_>> = all
-        .iter()
-        .copied()
+/// 真ん中:ボードかリスト。issue につながっていない PR は別の段。
+/// `width` は、いま使える幅。列の幅は 250〜330 に収め、入りきらなければ横に送る
+/// (画面の形が変わっても、カードの形が変わりすぎないように)。
+fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
+    let shown: Vec<Item<'a>> = items(app)
+        .into_iter()
         .filter(|(v, r)| r.shows(app.filter, &v.viewer))
         .collect();
+    let col_w = ((width - 44.0 - 42.0) / 4.0).clamp(250.0, 330.0);
+    let band = |loose: bool| -> Vec<Item<'_>> {
+        shown
+            .iter()
+            .copied()
+            .filter(|(_, r)| (r.kind == Kind::Pr) == loose)
+            .collect()
+    };
+    let mut body = column![].spacing(10).padding([14, 22]);
+    for (loose, title) in [(false, ""), (true, "issue につながっていない PR")] {
+        let rows = band(loose);
+        if rows.is_empty() {
+            continue;
+        }
+        if !title.is_empty() {
+            body = body.push(
+                row![
+                    text(title).size(13).color(TEXT),
+                    cap(rows.len().to_string())
+                ]
+                .spacing(9)
+                .padding([10, 0]),
+            );
+        }
+        match app.look {
+            Look::Board => {
+                let mut cols = row![].spacing(14);
+                for (i, name) in COLUMNS.iter().enumerate() {
+                    let mut col = column![].spacing(9).width(col_w);
+                    let here: Vec<&Item<'_>> = rows
+                        .iter()
+                        .filter(|(_, r)| column_of(r.stage) == i)
+                        .collect();
+                    col = col.push(
+                        row![
+                            text(*name).size(13).color(TEXT),
+                            cap(here.len().to_string())
+                        ]
+                        .spacing(8),
+                    );
+                    col = col.push(rule());
+                    for (v, r) in here {
+                        col = col.push(card(app, v, r, false));
+                    }
+                    cols = cols.push(col);
+                }
+                body = body.push(cols);
+            }
+            Look::List => {
+                for i in LIST_ORDER {
+                    let here: Vec<&Item<'_>> = rows
+                        .iter()
+                        .filter(|(_, r)| column_of(r.stage) == i)
+                        .collect();
+                    if here.is_empty() {
+                        continue;
+                    }
+                    body = body.push(
+                        row![
+                            text(COLUMNS[i]).size(13).color(TEXT),
+                            cap(here.len().to_string())
+                        ]
+                        .spacing(9)
+                        .padding([6, 0]),
+                    );
+                    for (v, r) in here {
+                        body = body.push(card(app, v, r, true));
+                    }
+                }
+            }
+        }
+    }
+    if shown.is_empty() && !app.loading {
+        body = body.push(container(cap("出すものがありません")).padding(40));
+    }
+
+    match app.look {
+        Look::Board => scrollable(body)
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::default(),
+                horizontal: scrollable::Scrollbar::default(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+        Look::List => scrollable(body.width(Length::Fill))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+    }
+}
+
+fn view(app: &App) -> Element<'_, Msg> {
+    let all = items(app);
     let count = |f: Filter| all.iter().filter(|(v, r)| r.shows(f, &v.viewer)).count();
 
     // 左端:部屋の列。数字は、その部屋で自分の番の件数
@@ -750,81 +872,6 @@ fn view(app: &App) -> Element<'_, Msg> {
     }
 
     // 真ん中:ボードかリスト。issue につながっていない PR は別の段
-    let band = |loose: bool| -> Vec<Item<'_>> {
-        shown
-            .iter()
-            .copied()
-            .filter(|(_, r)| (r.kind == Kind::Pr) == loose)
-            .collect()
-    };
-    let mut body = column![].spacing(10).padding([14, 22]);
-    for (loose, title) in [(false, ""), (true, "issue につながっていない PR")] {
-        let rows = band(loose);
-        if rows.is_empty() {
-            continue;
-        }
-        if !title.is_empty() {
-            body = body.push(
-                row![
-                    text(title).size(13).color(TEXT),
-                    cap(rows.len().to_string())
-                ]
-                .spacing(9)
-                .padding([10, 0]),
-            );
-        }
-        match app.look {
-            Look::Board => {
-                let mut cols = row![].spacing(14);
-                for (i, name) in COLUMNS.iter().enumerate() {
-                    let mut col = column![].spacing(9).width(Length::FillPortion(1));
-                    let here: Vec<&Item<'_>> = rows
-                        .iter()
-                        .filter(|(_, r)| column_of(r.stage) == i)
-                        .collect();
-                    col = col.push(
-                        row![
-                            text(*name).size(13).color(TEXT),
-                            cap(here.len().to_string())
-                        ]
-                        .spacing(8),
-                    );
-                    col = col.push(rule());
-                    for (v, r) in here {
-                        col = col.push(card(app, v, r, false));
-                    }
-                    cols = cols.push(col);
-                }
-                body = body.push(cols);
-            }
-            Look::List => {
-                for i in LIST_ORDER {
-                    let here: Vec<&Item<'_>> = rows
-                        .iter()
-                        .filter(|(_, r)| column_of(r.stage) == i)
-                        .collect();
-                    if here.is_empty() {
-                        continue;
-                    }
-                    body = body.push(
-                        row![
-                            text(COLUMNS[i]).size(13).color(TEXT),
-                            cap(here.len().to_string())
-                        ]
-                        .spacing(9)
-                        .padding([6, 0]),
-                    );
-                    for (v, r) in here {
-                        body = body.push(card(app, v, r, true));
-                    }
-                }
-            }
-        }
-    }
-    if shown.is_empty() && !app.loading {
-        body = body.push(container(cap("出すものがありません")).padding(40));
-    }
-
     // 右:選んだ 1 件
     let detail: Option<Element<'_, Msg>> =
         match current(app) {
@@ -843,10 +890,14 @@ fn view(app: &App) -> Element<'_, Msg> {
                         .color(TEXT)
                         .wrapping(text::Wrapping::WordOrGlyph),
                     container(
-                        text(format!("{}。次は {next}。{} 動いていない。", r.why, r.age))
-                            .size(14)
-                            .color(TEXT)
-                            .wrapping(text::Wrapping::WordOrGlyph)
+                        text(if r.age.is_empty() {
+                            format!("{}。次は {next}。", r.why)
+                        } else {
+                            format!("{}。次は {next}。{} 動いていない。", r.why, r.age)
+                        })
+                        .size(14)
+                        .color(TEXT)
+                        .wrapping(text::Wrapping::WordOrGlyph)
                     )
                     .padding([12, 14])
                     .width(Length::Fill)
@@ -913,14 +964,14 @@ fn view(app: &App) -> Element<'_, Msg> {
         cap("↑↓ 移動"),
         cap("Tab 絞り込み"),
         cap("V ボード / リスト"),
-        cap("Enter 開く"),
+        cap("Enter 中身を出す"),
         cap("R 読み直す"),
         cap("Esc 閉じる"),
     ]
     .spacing(18)
     .padding([9, 22]);
 
-    let mut frame = row![
+    let frame = row![
         container(rail).padding([14, 11]),
         vrule(),
         container(scrollable(side)).width(210),
@@ -929,20 +980,36 @@ fn view(app: &App) -> Element<'_, Msg> {
             container(bar).padding([14, 22]),
             rule(),
             container(notes).padding([6, 22]),
-            scrollable(body).height(Length::Fill).width(Length::Fill),
+            responsive(move |size| middle(app, size.width)),
             rule(),
             foot,
         ]
         .width(Length::Fill),
     ]
     .height(Length::Fill);
-    // 右の詳細は、選んだときだけ出す。選んでいない間は、ボードに幅を全部 使う
-    if let Some(detail) = detail {
-        frame = frame
-            .push(vrule())
-            .push(container(detail).width(372).height(Length::Fill));
+    let base: Element<'_, Msg> = container(frame).style(fill(BG)).into();
+    // 選んだ 1 件の中身は、前に大きく出す。ボードの幅を取らないので、カードの形が変わらない
+    match detail.filter(|_| app.open) {
+        Some(detail) => stack![
+            base,
+            opaque(
+                mouse_area(
+                    container(opaque(
+                        container(detail)
+                            .max_width(820)
+                            .max_height(680)
+                            .style(boxed(LINE2, BG))
+                    ))
+                    .center(Length::Fill)
+                    .padding(40)
+                    .style(fill(Color::from_rgba(0.0, 0.0, 0.0, 0.62)))
+                )
+                .on_press(Msg::Close)
+            ),
+        ]
+        .into(),
+        None => base,
     }
-    container(frame).style(fill(BG)).into()
 }
 
 fn subscription(_: &App) -> Subscription<Msg> {
@@ -962,10 +1029,18 @@ fn main() -> iced::Result {
     if std::env::var_os("WSL_DISTRO_NAME").is_some() {
         std::env::remove_var("WAYLAND_DISPLAY");
     }
+    // 窓の最初の大きさ。`ASIS_WINDOW=1366x768` で変えられる(いろいろな画面の形で確かめる用)
+    let size = std::env::var("ASIS_WINDOW")
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
+        })
+        .unwrap_or((1320.0, 820.0));
     iced::application(boot, update, view)
         .title("asis")
         .subscription(subscription)
         .default_font(Font::with_name(font))
-        .window_size((1320.0, 820.0))
+        .window_size(size)
         .run()
 }
