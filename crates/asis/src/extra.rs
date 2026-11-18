@@ -11,8 +11,14 @@ use std::process::Command;
 pub trait Reader: Send + Sync {
     /// main にあるファイルの場所を見て、読むかを決める
     fn wants(&self, path: &str) -> bool;
-    /// 読んだファイル(場所, 中身)と、PR の題(並びは repo の PR と同じ)から、足すタスクを返す
-    fn tasks(&self, files: &[(String, String)], pr_titles: &[&str]) -> Vec<FileTask>;
+    /// 読んだファイル(場所, 中身)と、PR の題(並びは repo の PR と同じ)と、
+    /// PR がまだ無いブランチの名前から、足すタスクを返す
+    fn tasks(
+        &self,
+        files: &[(String, String)],
+        pr_titles: &[&str],
+        branches: &[&str],
+    ) -> Vec<FileTask>;
 }
 
 /// ファイルに書かれたタスク 1 つ
@@ -29,6 +35,17 @@ pub struct FileTask {
     pub body: String,
     /// つながる PR。`pr_titles` の何番目か
     pub prs: Vec<usize>,
+    /// このタスクの作業をしている、PR がまだ無いブランチ(`branches` から選んだもの)
+    pub branches: Vec<String>,
+}
+
+/// repo に push されたブランチのうち、PR がまだ無いもの(既定のブランチは除く)
+pub fn branches_without_pr<'a>(branches: &'a [String], pr_heads: &[&str]) -> Vec<&'a str> {
+    branches
+        .iter()
+        .map(String::as_str)
+        .filter(|b| !matches!(*b, "main" | "master") && !pr_heads.contains(b))
+        .collect()
 }
 
 /// `stamps` の 1 件から、main の今の commit を取り出す
@@ -122,5 +139,11 @@ mod tests {
             {"path": "docs/メモ.md", "type": "blob"}
         ]});
         assert_eq!(paths_in_tree(&tree), vec!["docs/メモ.md"]);
+    }
+
+    #[test]
+    fn only_branches_without_a_pr_are_passed() {
+        let branches = ["main".to_string(), "feat/a".into(), "feat/b".into()];
+        assert_eq!(branches_without_pr(&branches, &["feat/a"]), vec!["feat/b"]);
     }
 }

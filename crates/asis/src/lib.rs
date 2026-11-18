@@ -481,7 +481,10 @@ impl Loader {
                                     (Some(r), Some((_, Ok(files)))) => {
                                         let titles: Vec<&str> =
                                             f.prs.iter().map(|p| p.title.as_str()).collect();
-                                        (r.tasks(files, &titles), None)
+                                        let heads: Vec<&str> =
+                                            f.prs.iter().map(|p| p.head_ref.as_str()).collect();
+                                        let lone = extra::branches_without_pr(&f.branches, &heads);
+                                        (r.tasks(files, &titles, &lone), None)
                                     }
                                     (Some(_), Some((_, Err(e)))) => {
                                         (vec![], Some(format!("docs を読めませんでした: {e}")))

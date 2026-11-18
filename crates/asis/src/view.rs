@@ -328,7 +328,9 @@ pub fn build(
         let is_open = t
             .open
             .unwrap_or_else(|| idx.iter().any(|i| f.prs[*i].lifecycle == Lifecycle::Open));
-        let local = local_for(&|b| idx.iter().any(|i| open_branch(*i) == Some(b)));
+        let local = local_for(&|b| {
+            idx.iter().any(|i| open_branch(*i) == Some(b)) || t.branches.iter().any(|x| x == b)
+        });
         let as_issue = IssueFacts {
             repo: f.repo.clone(),
             number: 0,
@@ -338,7 +340,7 @@ pub fn build(
             assignees: vec![],
             body: t.body.clone(),
         };
-        let v = judge_task(&as_issue, &vs, !local.is_empty());
+        let v = judge_task(&as_issue, &vs, !local.is_empty() || !t.branches.is_empty());
         // PR がまだ無いものは誰のものでもないので出す。PR があれば、PR で絞る
         if !idx.is_empty() && !idx.iter().any(|i| wanted_pr(&f.prs[*i])) {
             continue;
@@ -369,6 +371,9 @@ pub fn build(
             why: match v.state {
                 TaskState::ShippedOpen if file.is_empty() => "Deployed".to_string(),
                 TaskState::ShippedOpen => format!("Deployed · still open in {file}"),
+                TaskState::Doing if vs.is_empty() && !t.branches.is_empty() => {
+                    format!("In progress · {} · no PR yet", t.branches.join(", "))
+                }
                 s => task_label(s).to_string(),
             },
             body: t.body.clone(),
@@ -579,12 +584,16 @@ pub(crate) mod tests {
             },
             body: String::new(),
             prs: prs.to_vec(),
+            branches: vec![],
         };
+        let mut pushed = task("T-5", Some(true), &[]); // PR は無いが、ブランチは push 済み
+        pushed.branches = vec!["feat/t5-start".into()];
         let extra = [
             task("T-1", Some(true), &[1]), // 落ちているチェックの PR #21
             task("T-4", Some(true), &[]),  // PR がまだ無い
             task("T-2", None, &[2]),       // 番号だけ。PR は本番に出た
             task("T-3", Some(false), &[]), // 済んだ
+            pushed,
         ];
         let project = Project {
             name: "p".into(),
@@ -600,6 +609,9 @@ pub(crate) mod tests {
             "https://github.com/o/r/blob/HEAD/docs/plan.md"
         );
         assert_eq!(doc("T-4").map(|r| r.stage), Some(Stage::Todo));
+        let t5 = doc("T-5").unwrap();
+        assert_eq!(t5.stage, Stage::Doing);
+        assert_eq!(t5.why, "In progress · feat/t5-start · no PR yet");
         // 本番に出た番号だけのタスクと、済んだタスクは出さない
         assert!(doc("T-2").is_none() && doc("T-3").is_none());
         // ファイルのタスクに入った PR は、つながっていない PR の段に出ない
