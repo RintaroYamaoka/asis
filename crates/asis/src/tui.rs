@@ -455,13 +455,13 @@ mod tests {
         let s = screen(&app(Filter::All, 0), 130, 24);
         // 全角の文字は 2 桁を使い、2 桁目は空になるので、空白を抜いて照らす
         let s: String = s.chars().filter(|c| *c != ' ').collect();
-        assert!(s.contains("すべて4"), "{s}");
-        assert!(s.contains("自分の番2"));
-        assert!(s.contains("相手の番1"));
+        assert!(s.contains("All4"), "{s}");
+        assert!(s.contains("Yourturn2"));
+        assert!(s.contains("Theirturn1"));
         assert!(s.contains("shopo/r"));
         assert!(s.contains("Inreview1"));
         assert!(s.contains("#7login"));
-        assert!(s.contains("あなたの番"));
+        assert!(s.contains("Yourturn"));
         assert!(s.contains("https://github.com/o/r/issues/7"));
         assert!(s.contains("読めませんでした:o/x:権限がありません"));
     }

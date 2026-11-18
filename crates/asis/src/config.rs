@@ -35,6 +35,8 @@ pub struct Local {
     pub db: Option<Db>,
     /// 画面で使う 1 色(`#rrggbb`)。書かなければ既定の色
     pub accent: Option<String>,
+    /// 説明の文の言葉。`ja`(既定)か `en`。大事な単語は、どちらでも英語
+    pub lang: Option<String>,
 }
 
 /// 部屋を置く DB(Supabase)の場所と、公開用の鍵
@@ -81,6 +83,7 @@ struct RawLocal {
     project: Vec<RawProject>,
     db: Option<Db>,
     accent: Option<String>,
+    lang: Option<String>,
 }
 
 fn check_repo(repo: &str) -> Result<(), String> {
@@ -152,6 +155,9 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
             return Err(format!("accent は `#rrggbb` の形で書いてください: `{c}`"));
         }
     }
+    if raw.lang.as_deref().is_some_and(|l| l != "ja" && l != "en") {
+        return Err("lang は `ja` か `en` で書いてください".into());
+    }
     Ok(Local {
         watch: raw.watch,
         roots: raw.roots,
@@ -159,6 +165,7 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
         projects,
         db,
         accent: raw.accent,
+        lang: raw.lang,
     })
 }
 
@@ -348,6 +355,12 @@ deploy = ["me"]
         assert_eq!(parse_color("#f2b63"), None);
         assert_eq!(parse_color("#zzzzzz"), None);
         assert!(parse_local("accent = \"orange\"").is_err());
+        // 言葉は ja か en
+        assert_eq!(
+            parse_local("lang = \"en\"").unwrap().lang.as_deref(),
+            Some("en")
+        );
+        assert!(parse_local("lang = \"fr\"").is_err());
     }
 
     #[test]

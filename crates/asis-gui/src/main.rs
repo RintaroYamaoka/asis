@@ -62,6 +62,19 @@ struct App {
     synced: Option<Instant>,
     error: Option<String>,
     accent: Color,
+    /// 説明の文を英語で出すか(大事な単語は、どちらでも英語)
+    english: bool,
+}
+
+impl App {
+    /// 説明の文を、設定の言葉で返す
+    fn t(&self, ja: &'static str, en: &'static str) -> &'static str {
+        if self.english {
+            en
+        } else {
+            ja
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -130,6 +143,7 @@ fn boot() -> (App, Task<Msg>) {
         .and_then(|c| asis::config::parse_color(&c))
         .map(|[r, g, b]| Color::from_rgb8(r, g, b))
         .unwrap_or(Color::from_rgb8(0xf2, 0xb6, 0x3c));
+    let english = asis::config::load().ok().and_then(|l| l.lang).as_deref() == Some("en");
     let app = App {
         loader: loader.clone(),
         sections: Arc::new(Vec::new()),
@@ -150,6 +164,7 @@ fn boot() -> (App, Task<Msg>) {
         synced: None,
         error: None,
         accent,
+        english,
     };
     (app, load(loader, true))
 }
@@ -503,7 +518,7 @@ fn label_of(row: &Row) -> String {
     match row.kind {
         Kind::Task => format!("#{}", row.number),
         Kind::Pr => format!("PR {}", row.number),
-        Kind::Local => "手元".to_string(),
+        Kind::Local => "Local".to_string(),
     }
 }
 
@@ -605,7 +620,7 @@ fn seg<'a>(label: String, on: bool, msg: Msg) -> Element<'a, Msg> {
 
 fn turn_of<'a>(row: &Row, viewer: &str, accent: Color) -> iced::widget::Text<'a> {
     if row.is_mine(viewer) {
-        text("あなた").size(13).color(accent)
+        text("You").size(13).color(accent)
     } else if row.turn.is_empty() {
         text("—").size(13).color(DIM)
     } else {
@@ -708,7 +723,7 @@ fn pr_card<'a>(
                 .height(16)
                 .clip(true),
             if mine {
-                text("あなた").size(13).color(app.accent)
+                text("You").size(13).color(app.accent)
             } else if p.turn.is_empty() {
                 text("—").size(13).color(DIM)
             } else {
@@ -728,9 +743,9 @@ fn todo_card<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> {
     let local = r.local.first().map(|l| l.branch.clone());
     let body = column![
         cap(match (&local, r.kind) {
-            (Some(b), _) => format!("手元: {b}"),
-            (None, _) if r.stage == Stage::Doing => "ブランチあり・PR はまだ".to_string(),
-            _ => "PR はまだ".to_string(),
+            (Some(b), _) => format!("Local: {b}"),
+            (None, _) if r.stage == Stage::Doing => "Branch pushed · no PR yet".to_string(),
+            _ => "No PR yet".to_string(),
         }),
         row![
             Space::new().width(Length::Fill),
@@ -755,9 +770,9 @@ fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
     let free = loose(&all);
     if all.is_empty() {
         return container(cap(if app.loading {
-            "GitHub から読んでいます…"
+            "Loading from GitHub…"
         } else {
-            "出すものがありません"
+            "Nothing to show"
         }))
         .center(Length::Fill)
         .into();
@@ -784,7 +799,7 @@ fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
         if !free.is_empty() {
             body = body.push(
                 row![
-                    text("issue につながっていない PR").size(13).color(TEXT),
+                    text("Unlinked PRs").size(13).color(TEXT),
                     cap(free.len().to_string())
                 ]
                 .spacing(9)
@@ -899,7 +914,7 @@ fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
         body = body.push(
             container(
                 row![
-                    text("issue につながっていない PR").size(13).color(TEXT),
+                    text("Unlinked PRs").size(13).color(TEXT),
                     cap(free.len().to_string())
                 ]
                 .spacing(9),
@@ -1039,19 +1054,19 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
     let key = key_of(v, r);
     let me = |turn: &[String]| -> (String, bool) {
         if turn.contains(&v.viewer) {
-            ("あなた".to_string(), true)
+            ("you".to_string(), true)
         } else if turn.is_empty() {
-            ("だれでもない".to_string(), false)
+            ("no one".to_string(), false)
         } else {
-            (turn.join("・"), false)
+            (turn.join(", "), false)
         }
     };
     let why = |state: String, next: String| -> Element<'_, Msg> {
         container(
             text(if r.age.is_empty() {
-                format!("{state}。次は {next}。")
+                format!("{state} · Waiting on {next}")
             } else {
-                format!("{state}。次は {next}。{} 動いていない。", r.age)
+                format!("{state} · Waiting on {next} · idle {}", r.age)
             })
             .size(14)
             .color(TEXT)
@@ -1081,7 +1096,7 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                     Msg::Select(key.clone(), None),
                 ));
             } else {
-                top = top.push(cap("issue なし"));
+                top = top.push(cap("No linked issue"));
             }
             top = top.push(Space::new().width(Length::Fill));
             let n = r.prs.len();
@@ -1101,7 +1116,7 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                         .wrapping(text::Wrapping::WordOrGlyph),
                 )
                 .push(why(p.why.clone(), next))
-                .push(cap(format!("{} が出した", p.author)));
+                .push(cap(format!("by {}", p.author)));
             if let Some(n) = notice_of(app) {
                 d = d.push(n);
             }
@@ -1134,7 +1149,12 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                     });
                     d = d.push(
                         row![
-                            field("何を直すかを一言", &app.comment, Msg::Comment, send.clone()),
+                            field(
+                                "What needs to change?",
+                                &app.comment,
+                                Msg::Comment,
+                                send.clone()
+                            ),
                             primary("Request changes", app.accent, free.then_some(send)),
                         ]
                         .spacing(8)
@@ -1161,10 +1181,10 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                 d = d.push(merge(true));
             }
             for l in &r.local {
-                d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
+                d = d.push(cap(format!("Local  {}  {}", l.branch, l.panes.join(" / "))));
             }
             d = d.push(seg(
-                format!("PR #{number} を GitHub で開く"),
+                format!("Open PR #{number} on GitHub"),
                 false,
                 Msg::Open(format!("https://github.com/{}/pull/{number}", v.repo)),
             ));
@@ -1185,9 +1205,9 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                 d = d.push(n);
             }
             if r.kind == Kind::Task {
-                d = d.push(cap("issue の本文")).push(
+                d = d.push(cap("Description")).push(
                     text(if r.body.trim().is_empty() {
-                        "(本文なし)".to_string()
+                        "No description".to_string()
                     } else {
                         r.body.clone()
                     })
@@ -1197,12 +1217,9 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                 );
             }
             if r.prs.is_empty() {
-                d = d.push(cap("PR はまだありません"));
+                d = d.push(cap("No pull requests yet"));
             } else {
-                d = d.push(cap(format!(
-                    "PR {} 本(押すと、その 1 本の中身に移る)",
-                    r.prs.len()
-                )));
+                d = d.push(cap(format!("{} pull requests", r.prs.len())));
                 for p in &r.prs {
                     let (who, mine) = me(&p.turn);
                     let one = column![
@@ -1232,12 +1249,12 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                 }
             }
             for l in &r.local {
-                d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
+                d = d.push(cap(format!("Local  {}  {}", l.branch, l.panes.join(" / "))));
             }
             if !r.url.is_empty() {
                 d = d.push(seg(
                     format!(
-                        "{} を GitHub で開く",
+                        "Open {} on GitHub",
                         if r.kind == Kind::Task {
                             format!("issue #{}", r.number)
                         } else {
@@ -1273,17 +1290,15 @@ fn write_form(app: &App) -> Option<Element<'_, Msg>> {
         picks = picks.push(seg(short(&repo).to_string(), on, Msg::WriteRepo(repo)));
     }
     let mut d = column![
-        text("issue を書く").size(18).color(TEXT),
-        cap("1 行でよい。型は無い。書いたものが、そのまま AI への指示になる。"),
+        text("New issue").size(18).color(TEXT),
+        cap(app.t(
+            "1 行でよい。型は無い。書いたものが、そのまま AI への指示になる。",
+            "One line is enough. No template. What you write becomes the instruction for the AI."
+        )),
         picks.wrap(),
+        field("Title", &w.title, Msg::WriteTitle, send.clone()),
         field(
-            "例:検索が遅い気がする",
-            &w.title,
-            Msg::WriteTitle,
-            send.clone()
-        ),
-        field(
-            "本文(書かなくてもよい)",
+            "Description (optional)",
             &w.body,
             Msg::WriteBody,
             send.clone()
@@ -1296,8 +1311,8 @@ fn write_form(app: &App) -> Option<Element<'_, Msg>> {
     d = d.push(
         row![
             Space::new().width(Length::Fill),
-            seg("やめる".into(), false, Msg::Close),
-            primary("書く", app.accent, ready.then_some(send)),
+            seg("Cancel".into(), false, Msg::Close),
+            primary("Create", app.accent, ready.then_some(send)),
         ]
         .spacing(8),
     );
@@ -1362,7 +1377,7 @@ fn view(app: &App) -> Element<'_, Msg> {
             .on_press(msg)
             .into()
     };
-    let mut rail = column![tile("全部".into(), app.room.is_none(), 0, Msg::Room(None))]
+    let mut rail = column![tile("All".into(), app.room.is_none(), 0, Msg::Room(None))]
         .spacing(10)
         .align_x(Alignment::Center);
     for (i, s) in app.sections.iter().enumerate() {
@@ -1426,14 +1441,14 @@ fn view(app: &App) -> Element<'_, Msg> {
             text(
                 section
                     .map(|s| s.project.clone())
-                    .unwrap_or("全部の部屋".into())
+                    .unwrap_or("All rooms".into())
             )
             .size(17)
             .color(TEXT)
         )
         .padding([18, 18]),
         nav(
-            "すべて".into(),
+            "All".into(),
             room_items.len(),
             app.repo.is_none(),
             Msg::Repo(None)
@@ -1463,7 +1478,7 @@ fn view(app: &App) -> Element<'_, Msg> {
         ));
     }
     if let Some(s) = section.filter(|s| !s.people.is_empty()) {
-        side = side.push(container(cap("メンバー")).padding([14, 18]));
+        side = side.push(container(cap("Members")).padding([14, 18]));
         for (name, roles) in &s.people {
             let holds = room_items
                 .iter()
@@ -1476,7 +1491,7 @@ fn view(app: &App) -> Element<'_, Msg> {
                         column![
                             text(name.clone()).size(14).color(TEXT),
                             cap(if roles.is_empty() {
-                                "メンバー".to_string()
+                                "Member".to_string()
                             } else {
                                 roles.clone()
                             }),
@@ -1499,8 +1514,8 @@ fn view(app: &App) -> Element<'_, Msg> {
 
     // 上の段:絞り込み、見せ方、読み直し
     let status = match (app.loading, app.synced) {
-        (true, _) => "読み込み中…".to_string(),
-        (false, Some(t)) => format!("{} 秒前に同期", t.elapsed().as_secs()),
+        (true, _) => "Loading…".to_string(),
+        (false, Some(t)) => format!("Synced {}s ago", t.elapsed().as_secs()),
         (false, None) => String::new(),
     };
     let mut bar = row![].spacing(6).align_y(Alignment::Center);
@@ -1515,17 +1530,17 @@ fn view(app: &App) -> Element<'_, Msg> {
         .push(Space::new().width(Length::Fill))
         .push(cap(status))
         .push(seg(
-            "ボード".into(),
+            "Board".into(),
             app.look == Look::Board,
             Msg::Look(Look::Board),
         ))
         .push(seg(
-            "リスト".into(),
+            "List".into(),
             app.look == Look::List,
             Msg::Look(Look::List),
         ))
-        .push(seg("読み直す".into(), false, Msg::Refresh))
-        .push(primary("+ issue を書く", app.accent, Some(Msg::WriteOpen)));
+        .push(seg("Refresh".into(), false, Msg::Refresh))
+        .push(primary("New issue", app.accent, Some(Msg::WriteOpen)));
 
     // 注記と、読めなかった理由。黙って欠けさせない
     let mut notes = column![].spacing(2);
@@ -1560,14 +1575,14 @@ fn view(app: &App) -> Element<'_, Msg> {
     };
 
     let foot = row![
-        cap("↑↓ 移動"),
-        cap("Tab 絞り込み"),
-        cap("V ボード / リスト"),
-        cap("Enter 中身を出す"),
-        cap("←→ 前後の PR"),
-        cap("C 書く"),
-        cap("R 読み直す"),
-        cap("Esc 閉じる"),
+        cap("↑↓ Move"),
+        cap("Tab Filter"),
+        cap("V Board / List"),
+        cap("Enter Open"),
+        cap("←→ Prev / Next PR"),
+        cap("C New issue"),
+        cap("R Refresh"),
+        cap("Esc Close"),
     ]
     .spacing(18)
     .padding([9, 22]);

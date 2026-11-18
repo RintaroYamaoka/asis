@@ -156,9 +156,9 @@ impl Filter {
     }
     pub fn label(self) -> &'static str {
         match self {
-            Filter::All => "すべて",
-            Filter::Mine => "自分の番",
-            Filter::Others => "相手の番",
+            Filter::All => "All",
+            Filter::Mine => "Your turn",
+            Filter::Others => "Their turn",
         }
     }
 }
@@ -195,8 +195,8 @@ const ORDER: [TaskState; 5] = [
     TaskState::Doing,
     TaskState::Todo,
 ];
-pub const LOOSE: &str = "タスクにつながっていない PR";
-pub const LOCAL: &str = "手元の作業(PR はまだ)";
+pub const LOOSE: &str = "Unlinked PRs";
+pub const LOCAL: &str = "Local work (no PR yet)";
 
 /// `only` が空でなければ、その人たちが出した PR と、その人たちのタスクだけを出す。
 /// ほかの人の PR でも、その人たちが GitHub で確認を頼まれていれば出す(番が来ているものを隠さない)。
@@ -354,12 +354,12 @@ pub fn build(
             kind: Kind::Local,
             stage: Stage::Doing,
             number: 0,
-            label: "手元".into(),
+            label: "Local".into(),
             title: w.branch.clone(),
             url: String::new(),
             turn: vec![f.viewer.clone()],
             age: String::new(),
-            why: "手元で作業中・まだ PR が無い".into(),
+            why: "Working locally · no PR yet".into(),
             body: String::new(),
             prs: vec![],
             local: vec![l],
@@ -847,7 +847,7 @@ pub(crate) mod tests {
                 local[0].local_mark(),
                 local[0].turn.clone()
             ),
-            ("手元", "▶", vec!["bob".to_string()])
+            ("Local", "▶", vec!["bob".to_string()])
         );
         assert!(local[0].url.is_empty());
         // ほかの人の分だけを見ているときは、自分の手元の作業は出さない

@@ -98,7 +98,7 @@ pub fn run() -> Result<(), String> {
         }
         for r in &local.watch {
             match local.only.get(r) {
-                Some(people) => println!("{r}  ({} の分だけ)", people.join("・")),
+                Some(people) => println!("{r}  (only {})", people.join(", ")),
                 None => println!("{r}"),
             }
         }
@@ -454,7 +454,7 @@ fn plain_text(sections: &[Section], filter: Filter) -> String {
         }
         if shown == 0 {
             out.push_str(if filter == Filter::Mine {
-                "\n  あなたの番のものはありません\n"
+                "\n  Nothing is waiting on you\n"
             } else {
                 "\n  動いているものはありません\n"
             });
@@ -468,14 +468,14 @@ pub fn only_text(only: &[String]) -> String {
     if only.is_empty() {
         String::new()
     } else {
-        format!("  ({} の分だけ)", only.join("・"))
+        format!("  (only {})", only.join(", "))
     }
 }
 
 pub fn turn_text(turn: &[String], viewer: &str) -> String {
     match turn {
         [] => "-".to_string(),
-        t if t.iter().any(|x| x == viewer) => "あなたの番".to_string(),
+        t if t.iter().any(|x| x == viewer) => "Your turn".to_string(),
         t => t.join(","),
     }
 }
@@ -558,9 +558,9 @@ mod tests {
         let all = plain_text(&sections, Filter::All);
         assert!(all.contains("o/r\n"));
         assert_eq!(only_text(&[]), "");
-        assert_eq!(only_text(&["a".into(), "b".into()]), "  (a・b の分だけ)");
+        assert_eq!(only_text(&["a".into(), "b".into()]), "  (only a, b)");
         assert!(all.contains("In review  1"));
-        assert!(all.contains("#7      login  [あなたの番] 5h  ?#20"));
+        assert!(all.contains("#7      login  [Your turn] 5h  ?#20"));
         assert!(all.contains("!#21    pr 21  [ann] 5h  Checks failing (lint)"));
         let mine = plain_text(&sections, Filter::Mine);
         assert!(mine.contains("#7 ") && !mine.contains("#21") && !mine.contains("#8"));
@@ -585,7 +585,7 @@ mod tests {
     #[test]
     fn turn_text_forms() {
         assert_eq!(turn_text(&[], "me"), "-");
-        assert_eq!(turn_text(&["a".into(), "me".into()], "me"), "あなたの番");
+        assert_eq!(turn_text(&["a".into(), "me".into()], "me"), "Your turn");
         assert_eq!(turn_text(&["a".into(), "b".into()], "me"), "a,b");
     }
 }
