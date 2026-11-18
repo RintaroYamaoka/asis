@@ -8,7 +8,8 @@ use asis::view::{Filter, Kind, RepoView, Row, Stage};
 use asis::{Loader, Section};
 use iced::keyboard::{self, key::Named, Key as KeyCode};
 use iced::widget::{
-    button, column, container, mouse_area, opaque, responsive, row, scrollable, stack, text, Space,
+    button, column, container, mouse_area, opaque, responsive, row, scrollable, stack, text,
+    text_input, Space,
 };
 use iced::{Alignment, Border, Color, Element, Font, Length, Subscription, Task, Theme};
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,13 @@ enum Look {
     List,
 }
 
+#[derive(Default)]
+struct Write {
+    repo: Option<String>,
+    title: String,
+    body: String,
+}
+
 struct App {
     loader: Arc<Mutex<Option<Loader>>>,
     sections: Arc<Vec<Section>>,
@@ -37,6 +45,17 @@ struct App {
     selected: Option<Key>,
     /// 選んだ 1 件の中身を、前に大きく出しているか
     open: bool,
+    /// issue を書いている途中の中身
+    write: Option<Write>,
+    /// 直しを頼む一言を書いている PR
+    fixing: Option<u64>,
+    comment: String,
+    /// 取り込みを 1 回 押した PR(もう 1 回で進む)
+    confirm: Option<u64>,
+    /// 操作の結果。(文, うまくいったか)
+    notice: Option<(String, bool)>,
+    /// 操作を GitHub に送っている最中
+    busy: bool,
     loading: bool,
     synced: Option<Instant>,
     error: Option<String>,
@@ -52,6 +71,15 @@ enum Msg {
     Look(Look),
     Select(Key),
     Close,
+    Act(asis::act::Action),
+    Acted(Result<String, String>),
+    AskFix(u64),
+    Comment(String),
+    AskMerge(u64),
+    WriteOpen,
+    WriteRepo(String),
+    WriteTitle(String),
+    WriteBody(String),
     Open(String),
     Refresh,
     Again,
@@ -71,7 +99,19 @@ fn load(loader: Arc<Mutex<Option<Loader>>>, force: bool) -> Task<Msg> {
                 .lock()
                 .map_err(|_| "読み込みが途中で止まりました".to_string())?;
             if guard.is_none() {
-                *guard = Some(Loader::new(asis::default_source(&[])?));
+                // `asis-gui owner/repo` と打てば、その repo だけを既定の決まりで開く
+                let repos: Vec<String> = std::env::args().skip(1).collect();
+                let source = if repos.is_empty() {
+                    asis::default_source(&[])?
+                } else {
+                    asis::Source {
+                        watch: repos,
+                        only: Default::default(),
+                        roots: vec![],
+                        local: vec![],
+                    }
+                };
+                *guard = Some(Loader::new(source));
             }
             Ok(Arc::new(guard.as_mut().expect("入れたばかり").load(force)))
         },
@@ -97,6 +137,12 @@ fn boot() -> (App, Task<Msg>) {
         look: Look::Board,
         selected: None,
         open: false,
+        write: None,
+        fixing: None,
+        comment: String::new(),
+        confirm: None,
+        notice: None,
+        busy: false,
         loading: true,
         synced: None,
         error: None,
@@ -153,11 +199,86 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Select(key) => {
             app.selected = Some(key);
             app.open = true;
+            forget(app);
         }
-        Msg::Close => app.open = false,
+        Msg::Close => {
+            app.open = false;
+            app.write = None;
+            forget(app);
+        }
+        Msg::Act(action) => {
+            if app.busy {
+                return Task::none();
+            }
+            app.busy = true;
+            app.notice = None;
+            return Task::perform(async move { asis::act::run(&action) }, Msg::Acted);
+        }
+        Msg::Acted(result) => {
+            app.busy = false;
+            app.fixing = None;
+            app.confirm = None;
+            match result {
+                Ok(done) => {
+                    app.notice = Some((done, true));
+                    app.comment.clear();
+                    app.write = None;
+                    // 操作は事実を作っただけ。状態は、読み直した事実から決まる
+                    if !app.loading {
+                        app.loading = true;
+                        return load(app.loader.clone(), true);
+                    }
+                }
+                Err(e) => app.notice = Some((e, false)),
+            }
+        }
+        Msg::AskFix(n) => {
+            app.fixing = Some(n);
+            app.confirm = None;
+        }
+        Msg::Comment(t) => app.comment = t,
+        Msg::AskMerge(n) => {
+            app.confirm = Some(n);
+            app.fixing = None;
+        }
+        Msg::WriteOpen => {
+            let repos = repos_of(app);
+            app.notice = None;
+            app.write = Some(Write {
+                repo: app
+                    .repo
+                    .clone()
+                    .or_else(|| (repos.len() == 1).then(|| repos[0].clone())),
+                ..Write::default()
+            });
+        }
+        Msg::WriteRepo(repo) => {
+            if let Some(w) = &mut app.write {
+                w.repo = Some(repo);
+            }
+        }
+        Msg::WriteTitle(t) => {
+            if let Some(w) = &mut app.write {
+                w.title = t;
+            }
+        }
+        Msg::WriteBody(t) => {
+            if let Some(w) = &mut app.write {
+                w.body = t;
+            }
+        }
         Msg::Open(url) => open(&url),
         Msg::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
             if modifiers.control() || modifiers.alt() || modifiers.logo() {
+                return Task::none();
+            }
+            // 字を打っている間・中身を出している間は、Esc だけを受ける(打った字を奪わない)
+            if app.write.is_some() || app.open {
+                if key == KeyCode::Named(Named::Escape) {
+                    app.open = false;
+                    app.write = None;
+                    forget(app);
+                }
                 return Task::none();
             }
             match key.as_ref() {
@@ -184,6 +305,7 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 }
                 KeyCode::Character("j") => step(app, 1),
                 KeyCode::Character("k") => step(app, -1),
+                KeyCode::Character("c") => return update(app, Msg::WriteOpen),
                 KeyCode::Character("v") => {
                     app.look = match app.look {
                         Look::Board => Look::List,
@@ -200,6 +322,14 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Key(_) => {}
     }
     Task::none()
+}
+
+/// 書きかけの操作を忘れる(別の 1 件に移ったとき・閉じたとき)
+fn forget(app: &mut App) {
+    app.fixing = None;
+    app.confirm = None;
+    app.comment.clear();
+    app.notice = None;
 }
 
 /// GitHub のページをブラウザで開く
@@ -643,6 +773,286 @@ fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
     }
 }
 
+/// 押してほしいボタン。色の線の枠
+fn primary<'a>(label: &str, accent: Color, msg: Option<Msg>) -> Element<'a, Msg> {
+    let b = button(text(label.to_string()).size(14).color(accent))
+        .padding([6, 12])
+        .style(move |_, status| button::Style {
+            background: Some(
+                if matches!(status, button::Status::Hovered) {
+                    PANEL
+                } else {
+                    Color::TRANSPARENT
+                }
+                .into(),
+            ),
+            text_color: accent,
+            border: Border {
+                color: accent,
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            ..button::Style::default()
+        });
+    match msg {
+        Some(m) => b.on_press(m).into(),
+        None => b.into(),
+    }
+}
+
+fn field<'a>(hint: &str, value: &str, on: fn(String) -> Msg, send: Msg) -> Element<'a, Msg> {
+    text_input(hint, value)
+        .on_input(on)
+        .on_submit(send)
+        .size(14)
+        .padding(9)
+        .style(|_, status| text_input::Style {
+            background: Color::TRANSPARENT.into(),
+            border: Border {
+                color: if matches!(status, text_input::Status::Focused { .. }) {
+                    BRIGHT
+                } else {
+                    LINE2
+                },
+                width: 1.0,
+                radius: 5.0.into(),
+            },
+            icon: DIM,
+            placeholder: DIM,
+            value: TEXT,
+            selection: LINE2,
+        })
+        .into()
+}
+
+fn notice_of<'a>(app: &App) -> Option<Element<'a, Msg>> {
+    app.notice.as_ref().map(|(t, ok)| {
+        text(t.clone())
+            .size(13)
+            .color(if *ok { app.accent } else { BAD })
+            .into()
+    })
+}
+
+/// 選んだ 1 件の中身。前に大きく出す。操作は求めないが、ここでできる
+fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
+    let (v, r) = current(app)?;
+    let next = if r.is_mine(&v.viewer) {
+        "あなた".to_string()
+    } else if r.turn.is_empty() {
+        "だれでもない".to_string()
+    } else {
+        r.turn.join("・")
+    };
+    let frame = Color::from_rgb(0.165, 0.173, 0.165);
+    let mut d = column![
+        cap(format!("{} · {}", v.repo, label_of(r))),
+        text(r.title.clone())
+            .size(20)
+            .color(TEXT)
+            .wrapping(text::Wrapping::WordOrGlyph),
+        container(
+            text(if r.age.is_empty() {
+                format!("{}。次は {next}。", r.why)
+            } else {
+                format!("{}。次は {next}。{} 動いていない。", r.why, r.age)
+            })
+            .size(14)
+            .color(TEXT)
+            .wrapping(text::Wrapping::WordOrGlyph)
+        )
+        .padding([12, 14])
+        .width(Length::Fill)
+        .style(boxed(frame, Color::TRANSPARENT)),
+    ]
+    .spacing(14);
+    if let Some(n) = notice_of(app) {
+        d = d.push(n);
+    }
+    if !r.prs.is_empty() {
+        d = d.push(cap("PR"));
+    }
+    for p in &r.prs {
+        let mine = p.turn.contains(&v.viewer);
+        let mut one = column![
+            row![
+                cap(format!("#{}", p.number)),
+                text(p.why.clone())
+                    .size(12)
+                    .color(if p.mark == "!" { BAD } else { DIM }),
+                Space::new().width(Length::Fill),
+                text(if mine {
+                    "あなた".to_string()
+                } else {
+                    p.turn.join("・")
+                })
+                .size(13)
+                .color(if mine { app.accent } else { DIM }),
+            ]
+            .spacing(8),
+            text(p.title.clone())
+                .size(15)
+                .color(TEXT)
+                .wrapping(text::Wrapping::WordOrGlyph),
+            cap(p.author.clone()),
+        ]
+        .spacing(6);
+        // その PR の今の事実で、できる操作だけを出す
+        let repo = v.repo.clone();
+        let number = p.number;
+        let free = !app.busy;
+        if p.mark == "?" {
+            if app.fixing == Some(number) {
+                let send = Msg::Act(asis::act::Action::RequestChanges {
+                    repo,
+                    number,
+                    comment: app.comment.clone(),
+                });
+                one = one.push(
+                    row![
+                        field("何を直すかを一言", &app.comment, Msg::Comment, send.clone()),
+                        primary("直しを頼む", app.accent, free.then_some(send)),
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                );
+            } else {
+                // 1 人の repo では、承認なしで自分の PR を取り込む。その道も出す(2 回 押して進む)
+                let merge = if app.confirm == Some(number) {
+                    primary(
+                        "本当に取り込む",
+                        app.accent,
+                        free.then_some(Msg::Act(asis::act::Action::Merge {
+                            repo: repo.clone(),
+                            number,
+                        })),
+                    )
+                } else {
+                    seg("取り込む".into(), false, Msg::AskMerge(number))
+                };
+                one = one.push(
+                    row![
+                        primary(
+                            "承認する",
+                            app.accent,
+                            free.then_some(Msg::Act(asis::act::Action::Approve { repo, number }))
+                        ),
+                        seg("直しを頼む…".into(), false, Msg::AskFix(number)),
+                        merge,
+                    ]
+                    .spacing(8),
+                );
+            }
+        } else if p.mark == "+" {
+            // 取り込みは戻しにくいので、2 回 押して進む
+            one = one.push(if app.confirm == Some(number) {
+                primary(
+                    "本当に取り込む",
+                    app.accent,
+                    free.then_some(Msg::Act(asis::act::Action::Merge { repo, number })),
+                )
+            } else {
+                primary("取り込む", app.accent, Some(Msg::AskMerge(number)))
+            });
+        }
+        d = d.push(
+            container(one)
+                .padding([12, 14])
+                .width(Length::Fill)
+                .style(boxed(frame, Color::TRANSPARENT)),
+        );
+    }
+    if r.kind == Kind::Task {
+        d = d.push(cap("issue の本文"));
+        d = d.push(
+            text(if r.body.trim().is_empty() {
+                "(本文なし)".to_string()
+            } else {
+                r.body.clone()
+            })
+            .size(14)
+            .color(DIM)
+            .wrapping(text::Wrapping::WordOrGlyph),
+        );
+    }
+    for l in &r.local {
+        d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
+    }
+    if !r.url.is_empty() {
+        d = d.push(seg("GitHub で開く".into(), false, Msg::Open(r.url.clone())));
+    }
+    Some(
+        scrollable(container(d).padding(24).width(Length::Fill))
+            .width(760)
+            .into(),
+    )
+}
+
+/// issue を書く。1 行でよい。型は無い
+fn write_form(app: &App) -> Option<Element<'_, Msg>> {
+    let w = app.write.as_ref()?;
+    let repos: Vec<String> = repos_of(app);
+    let send = Msg::Act(asis::act::Action::WriteIssue {
+        repo: w.repo.clone().unwrap_or_default(),
+        title: w.title.clone(),
+        body: w.body.clone(),
+    });
+    let ready = !app.busy && w.repo.is_some() && !w.title.trim().is_empty();
+    let mut picks = row![].spacing(6);
+    for repo in repos {
+        let on = w.repo.as_deref() == Some(repo.as_str());
+        picks = picks.push(seg(short(&repo).to_string(), on, Msg::WriteRepo(repo)));
+    }
+    let mut d = column![
+        text("issue を書く").size(18).color(TEXT),
+        cap("1 行でよい。型は無い。書いたものが、そのまま AI への指示になる。"),
+        picks.wrap(),
+        field(
+            "例:検索が遅い気がする",
+            &w.title,
+            Msg::WriteTitle,
+            send.clone()
+        ),
+        field(
+            "本文(書かなくてもよい)",
+            &w.body,
+            Msg::WriteBody,
+            send.clone()
+        ),
+    ]
+    .spacing(12);
+    if let Some(n) = notice_of(app) {
+        d = d.push(n);
+    }
+    d = d.push(
+        row![
+            Space::new().width(Length::Fill),
+            seg("やめる".into(), false, Msg::Close),
+            primary("書く", app.accent, ready.then_some(send)),
+        ]
+        .spacing(8),
+    );
+    Some(container(d).padding(24).width(600).into())
+}
+
+/// 開いている部屋の repo
+fn repos_of(app: &App) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (_, s) in app
+        .sections
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| app.room.is_none_or(|r| r == *i))
+    {
+        for v in s.repos.iter().filter_map(|r| r.as_ref().ok()) {
+            if !out.contains(&v.repo) {
+                out.push(v.repo.clone());
+            }
+        }
+    }
+    out
+}
+
 fn view(app: &App) -> Element<'_, Msg> {
     let all = items(app);
     let count = |f: Filter| all.iter().filter(|(v, r)| r.shows(f, &v.viewer)).count();
@@ -845,7 +1255,8 @@ fn view(app: &App) -> Element<'_, Msg> {
             app.look == Look::List,
             Msg::Look(Look::List),
         ))
-        .push(seg("読み直す".into(), false, Msg::Refresh));
+        .push(seg("読み直す".into(), false, Msg::Refresh))
+        .push(primary("+ issue を書く", app.accent, Some(Msg::WriteOpen)));
 
     // 注記と、読めなかった理由。黙って欠けさせない
     let mut notes = column![].spacing(2);
@@ -873,98 +1284,18 @@ fn view(app: &App) -> Element<'_, Msg> {
 
     // 真ん中:ボードかリスト。issue につながっていない PR は別の段
     // 右:選んだ 1 件
-    let detail: Option<Element<'_, Msg>> =
-        match current(app) {
-            Some((v, r)) => {
-                let next = if r.is_mine(&v.viewer) {
-                    "あなた".to_string()
-                } else if r.turn.is_empty() {
-                    "だれでもない".to_string()
-                } else {
-                    r.turn.join("・")
-                };
-                let mut d = column![
-                    cap(format!("{} · {}", v.repo, label_of(r))),
-                    text(r.title.clone())
-                        .size(19)
-                        .color(TEXT)
-                        .wrapping(text::Wrapping::WordOrGlyph),
-                    container(
-                        text(if r.age.is_empty() {
-                            format!("{}。次は {next}。", r.why)
-                        } else {
-                            format!("{}。次は {next}。{} 動いていない。", r.why, r.age)
-                        })
-                        .size(14)
-                        .color(TEXT)
-                        .wrapping(text::Wrapping::WordOrGlyph)
-                    )
-                    .padding([12, 14])
-                    .width(Length::Fill)
-                    .style(boxed(
-                        Color::from_rgb(0.165, 0.173, 0.165),
-                        Color::TRANSPARENT
-                    )),
-                ]
-                .spacing(14);
-                if !r.prs.is_empty() {
-                    d = d.push(cap("PR"));
-                    for p in &r.prs {
-                        let mine = p.turn.contains(&v.viewer);
-                        d =
-                            d.push(
-                                container(
-                                    column![
-                                        row![
-                                            cap(format!("#{}", p.number)),
-                                            text(p.why.clone()).size(12).color(if p.mark == "!" {
-                                                BAD
-                                            } else {
-                                                DIM
-                                            }),
-                                            Space::new().width(Length::Fill),
-                                            text(if mine {
-                                                "あなた".to_string()
-                                            } else {
-                                                p.turn.join("・")
-                                            })
-                                            .size(13)
-                                            .color(if mine { app.accent } else { DIM }),
-                                        ]
-                                        .spacing(8),
-                                        text(p.title.clone())
-                                            .size(14)
-                                            .color(TEXT)
-                                            .wrapping(text::Wrapping::WordOrGlyph),
-                                        cap(p.author.clone()),
-                                    ]
-                                    .spacing(5),
-                                )
-                                .padding([11, 14])
-                                .width(Length::Fill)
-                                .style(boxed(
-                                    Color::from_rgb(0.165, 0.173, 0.165),
-                                    Color::TRANSPARENT,
-                                )),
-                            );
-                    }
-                }
-                for l in &r.local {
-                    d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
-                }
-                if !r.url.is_empty() {
-                    d = d.push(seg("GitHub で開く".into(), false, Msg::Open(r.url.clone())));
-                }
-                Some(scrollable(container(d).padding(22).width(Length::Fill)).into())
-            }
-            None => None,
-        };
+    let detail = if app.write.is_some() {
+        write_form(app)
+    } else {
+        detail_of(app)
+    };
 
     let foot = row![
         cap("↑↓ 移動"),
         cap("Tab 絞り込み"),
         cap("V ボード / リスト"),
         cap("Enter 中身を出す"),
+        cap("C 書く"),
         cap("R 読み直す"),
         cap("Esc 閉じる"),
     ]
@@ -989,7 +1320,7 @@ fn view(app: &App) -> Element<'_, Msg> {
     .height(Length::Fill);
     let base: Element<'_, Msg> = container(frame).style(fill(BG)).into();
     // 選んだ 1 件の中身は、前に大きく出す。ボードの幅を取らないので、カードの形が変わらない
-    match detail.filter(|_| app.open) {
+    match detail.filter(|_| app.open || app.write.is_some()) {
         Some(detail) => stack![
             base,
             opaque(
