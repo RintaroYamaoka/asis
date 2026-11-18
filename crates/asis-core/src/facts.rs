@@ -51,6 +51,25 @@ pub struct PrFacts {
     pub shipped: bool,
     /// GitHub が持つ PR と issue のリンク
     pub closes: Vec<IssueRef>,
+    /// いつ何が起きたか
+    pub times: Times,
+}
+
+/// PR に起きたことの時刻(ISO 8601 の UTC。同じ形なので、字のまま比べられる)。分からなければ空
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Times {
+    /// PR を出した
+    pub created: String,
+    /// 最後の push
+    pub pushed: String,
+    /// チェックが終わった(いちばん遅いもの)
+    pub checked: String,
+    /// 今の判定(承認・直しの依頼)になったレビュー
+    pub reviewed: String,
+    /// 作者がまだ返していない、人のコメントの最初の 1 つ
+    pub commented: String,
+    /// 取り込まれた
+    pub merged: String,
 }
 
 #[derive(Debug, Clone)]

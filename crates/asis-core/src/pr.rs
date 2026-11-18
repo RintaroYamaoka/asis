@@ -34,6 +34,27 @@ pub struct PrVerdict {
     /// 次に進められる人。誰の番でもなければ空
     pub turn: Vec<String>,
     pub reason: Reason,
+    /// この状態になった時刻(番が付いた時刻)。分からなければ空
+    pub since: String,
+}
+
+/// この理由の行に当たるようになった時刻。理由を作った出来事のうち、いちばん遅いもの。
+/// ぶつかりは、いつ起きたかが分からないので、分かっている出来事のいちばん遅いものにする
+fn since(pr: &PrFacts, reason: Reason) -> String {
+    let t = &pr.times;
+    let latest = |xs: &[&String]| xs.iter().max().map(|x| x.to_string()).unwrap_or_default();
+    match reason {
+        Reason::Shipped | Reason::Withdrawn => String::new(),
+        Reason::MergedNotShipped => t.merged.clone(),
+        Reason::Draft => t.created.clone(),
+        Reason::Conflict => latest(&[&t.created, &t.pushed, &t.checked, &t.reviewed, &t.commented]),
+        Reason::ChecksFailing(_) => latest(&[&t.pushed, &t.checked]),
+        Reason::ChangesRequested => latest(&[&t.reviewed]),
+        Reason::UnansweredComment => latest(&[&t.commented]),
+        Reason::ChecksRunning => t.pushed.clone(),
+        Reason::Approved => latest(&[&t.reviewed, &t.checked]),
+        Reason::AwaitingReview => latest(&[&t.created, &t.pushed, &t.checked]),
+    }
 }
 
 pub fn judge_pr(pr: &PrFacts, s: &Settings) -> PrVerdict {
@@ -72,6 +93,7 @@ pub fn judge_pr(pr: &PrFacts, s: &Settings) -> PrVerdict {
         state,
         turn,
         reason,
+        since: since(pr, reason),
     }
 }
 
@@ -137,6 +159,7 @@ pub(crate) mod tests {
             unanswered_comment: false,
             shipped: false,
             closes: vec![],
+            times: Times::default(),
         }
     }
 
@@ -152,6 +175,34 @@ pub(crate) mod tests {
 
     fn j(p: PrFacts) -> PrVerdict {
         judge_pr(&p, &team())
+    }
+
+    #[test]
+    fn since_is_the_latest_event_that_made_the_turn() {
+        let mut p = pr();
+        p.times = Times {
+            created: "2026-01-01T00:00:00Z".into(),
+            pushed: "2026-01-02T00:00:00Z".into(),
+            checked: "2026-01-02T00:10:00Z".into(),
+            reviewed: "2026-01-03T00:00:00Z".into(),
+            commented: "2026-01-04T00:00:00Z".into(),
+            merged: "2026-01-05T00:00:00Z".into(),
+        };
+        // 確認待ち: チェックが終わったとき(push と作成より後)
+        assert_eq!(j(p.clone()).since, "2026-01-02T00:10:00Z");
+        // 直しの依頼・承認: そのレビューのとき
+        p.review = Review::ChangesRequested;
+        assert_eq!(j(p.clone()).since, "2026-01-03T00:00:00Z");
+        p.review = Review::None;
+        // 返していないコメント: 最初のコメントのとき
+        p.unanswered_comment = true;
+        assert_eq!(j(p.clone()).since, "2026-01-04T00:00:00Z");
+        p.unanswered_comment = false;
+        // 下書き: PR を出したとき。取り込み済み: 取り込まれたとき
+        p.is_draft = true;
+        assert_eq!(j(p.clone()).since, "2026-01-01T00:00:00Z");
+        p.lifecycle = Lifecycle::Merged;
+        assert_eq!(j(p).since, "2026-01-05T00:00:00Z");
     }
 
     #[test]

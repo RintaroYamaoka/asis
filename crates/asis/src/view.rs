@@ -115,7 +115,12 @@ pub struct Row {
     pub title: String,
     pub url: String,
     pub turn: Vec<String>,
+    /// 番が付いてからの時間。番の付いた PR が何本かあれば、いちばん長く待たせているもの
     pub age: String,
+    /// 番が付いてからの秒。待たせている順に並べるためのもの。番が無ければ 0
+    pub waiting: i64,
+    /// 番が付いたまま、3 日 動きが無い
+    pub stale: bool,
     /// なぜこの状態か
     pub why: String,
     /// issue の本文。書かれたまま。issue でなければ空
@@ -140,6 +145,10 @@ pub struct PrLine {
     pub author: String,
     pub why: String,
     pub turn: Vec<String>,
+    /// 番が付いてからの時間
+    pub age: String,
+    /// 番が付いたまま、3 日 動きが無い
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +207,8 @@ const ORDER: [TaskState; 5] = [
     TaskState::Doing,
     TaskState::Todo,
 ];
+/// 動きが無いと印を付ける長さ(3 日)
+const STALE: i64 = 3 * 86400;
 pub const LOOSE: &str = "Unlinked PRs";
 pub const LOCAL: &str = "Local work (no PR yet)";
 
@@ -231,13 +242,39 @@ pub fn build(
     };
     let verdicts: Vec<PrVerdict> = f.prs.iter().map(|p| judge_pr(p, &settings)).collect();
     let links = link_all(&f.prs);
-    let line = |i: usize| PrLine {
-        mark: mark(verdicts[i].state),
-        number: f.prs[i].number,
-        title: f.prs[i].title.clone(),
-        author: f.prs[i].author.clone(),
-        why: why_pr(verdicts[i].reason, &f.pr_failing[i]),
-        turn: verdicts[i].turn.clone(),
+    // 番が付いてからの時間・秒・3 日 動きが無いか。番の付いた PR のうち、いちばん長く待たせているもので決める。
+    // 番の付いた PR が無ければ、最後に動いてからの時間だけを出す
+    let clock = |idx: &[usize]| -> (String, i64, bool) {
+        let newest = idx.iter().map(|i| f.pr_updated[*i].as_str()).max();
+        let since = idx
+            .iter()
+            .filter(|i| !verdicts[**i].turn.is_empty())
+            .map(|i| match verdicts[*i].since.as_str() {
+                "" => f.pr_updated[*i].as_str(),
+                s => s,
+            })
+            .min();
+        match (since.and_then(epoch), newest.and_then(epoch)) {
+            (Some(t), Some(moved)) => (
+                age(since.unwrap_or(""), now),
+                (now - t).max(0),
+                now - moved >= STALE,
+            ),
+            _ => (age(newest.unwrap_or(""), now), 0, false),
+        }
+    };
+    let line = |i: usize| {
+        let (age, _, stale) = clock(&[i]);
+        PrLine {
+            mark: mark(verdicts[i].state),
+            number: f.prs[i].number,
+            title: f.prs[i].title.clone(),
+            author: f.prs[i].author.clone(),
+            why: why_pr(verdicts[i].reason, &f.pr_failing[i]),
+            turn: verdicts[i].turn.clone(),
+            age,
+            stale,
+        }
     };
 
     // 手元の worktree を、ブランチで行に付ける。付いたものには印を付けておく。
@@ -293,11 +330,7 @@ pub fn build(
             continue;
         }; // 完了は出さない
         idx.iter().for_each(|i| claimed[*i] = true);
-        let newest = idx
-            .iter()
-            .map(|i| f.pr_updated[*i].as_str())
-            .max()
-            .unwrap_or("");
+        let (age, waiting, stale) = clock(&idx);
         groups[g].rows.push(Row {
             kind: Kind::Task,
             stage: Stage::of_task(t.state, &vs).unwrap_or(Stage::Todo),
@@ -306,7 +339,9 @@ pub fn build(
             title: issue.title.clone(),
             url: format!("https://github.com/{}/issues/{}", f.repo, issue.number),
             turn: t.turn,
-            age: age(newest, now),
+            age,
+            waiting,
+            stale,
             why: if t.mismatch {
                 format!("{} · issue closed, PR still open", task_label(t.state))
             } else {
@@ -346,11 +381,7 @@ pub fn build(
             continue;
         };
         idx.iter().for_each(|i| claimed[*i] = true);
-        let newest = idx
-            .iter()
-            .map(|i| f.pr_updated[*i].as_str())
-            .max()
-            .unwrap_or("");
+        let (age, waiting, stale) = clock(&idx);
         let file = t.path.rsplit('/').next().unwrap_or("");
         groups[g].rows.push(Row {
             kind: Kind::Doc,
@@ -364,7 +395,9 @@ pub fn build(
                 format!("https://github.com/{}/blob/HEAD/{}", f.repo, t.path)
             },
             turn: v.turn,
-            age: age(newest, now),
+            age,
+            waiting,
+            stale,
             why: match v.state {
                 TaskState::ShippedOpen if file.is_empty() => "Deployed".to_string(),
                 TaskState::ShippedOpen => format!("Deployed · still open in {file}"),
@@ -394,7 +427,9 @@ pub fn build(
             title: p.title.clone(),
             url: format!("https://github.com/{}/pull/{}", f.repo, p.number),
             turn: v.turn.clone(),
-            age: age(&f.pr_updated[i], now),
+            age: clock(&[i]).0,
+            waiting: clock(&[i]).1,
+            stale: clock(&[i]).2,
             why: why_pr(v.reason, &f.pr_failing[i]),
             body: String::new(),
             prs: vec![line(i)],
@@ -421,6 +456,8 @@ pub fn build(
             url: String::new(),
             turn: vec![f.viewer.clone()],
             age: String::new(),
+            waiting: 0,
+            stale: false,
             why: "Working locally · no PR yet".into(),
             body: String::new(),
             prs: vec![],
@@ -571,6 +608,7 @@ pub(crate) mod tests {
             unanswered_comment: false,
             shipped: false,
             closes: vec![],
+            times: Times::default(),
         }
     }
 
@@ -715,6 +753,35 @@ pub(crate) mod tests {
             .filter(|g| g.name == group)
             .flat_map(|g| g.rows.iter())
             .collect()
+    }
+
+    #[test]
+    fn age_counts_from_when_the_turn_began_and_marks_three_quiet_days() {
+        let project = Project {
+            name: "p".into(),
+            repos: vec!["o/r".into()],
+            ..Project::default()
+        };
+        // 今は 2026-11-18T12:34:56Z
+        let mut f = sample_facts(&[]);
+        // #20(確認待ち): 2 時間前にチェックが終わった。PR 自体は 5 時間前にも動いている
+        f.prs[0].times.checked = "2026-11-18T10:34:56Z".into();
+        // #21(チェックが落ちている): 4 日前に落ちて、それから動いていない
+        f.prs[1].times.checked = "2026-11-14T12:34:56Z".into();
+        f.pr_updated[1] = "2026-11-14T12:34:56Z".into();
+        let v = build(&f, &project, &[], &[], &[], 1795005296);
+        let all: Vec<&Row> = v.groups.iter().flat_map(|g| &g.rows).collect();
+        let row = |n: u64| {
+            *all.iter()
+                .find(|r| r.prs.iter().any(|p| p.number == n))
+                .unwrap()
+        };
+        assert_eq!((row(20).age.as_str(), row(20).stale), ("2h", false));
+        assert_eq!(row(20).waiting, 2 * 3600);
+        assert_eq!((row(21).age.as_str(), row(21).stale), ("4d", true));
+        assert!(row(21).prs[0].stale);
+        // 時刻が分からなければ、最後に動いたときから数える
+        assert_eq!(row(23).age, "5h");
     }
 
     #[test]

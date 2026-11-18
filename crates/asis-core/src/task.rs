@@ -79,6 +79,7 @@ mod tests {
     }
     fn v(state: PrState, turn: &[&str]) -> PrVerdict {
         PrVerdict {
+            since: String::new(),
             state,
             turn: turn.iter().map(|s| s.to_string()).collect(),
             reason: Reason::Draft,

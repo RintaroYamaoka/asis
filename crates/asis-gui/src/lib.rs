@@ -810,10 +810,15 @@ fn items(app: &App) -> Vec<Item<'_>> {
 
 /// 絞り込みまで当てたもの
 fn shown(app: &App) -> Vec<Item<'_>> {
-    items(app)
+    let mut out: Vec<Item<'_>> = items(app)
         .into_iter()
         .filter(|(v, r)| r.shows(app.filter, &v.viewer))
-        .collect()
+        .collect();
+    // 自分の番は、待たせている時間の長い順(同じ列・同じ段の中で)
+    if app.filter == Filter::Mine {
+        out.sort_by_key(|(_, r)| std::cmp::Reverse(r.waiting));
+    }
+    out
 }
 
 /// issue の段。人の手が要る順(In review → Merged → In progress → Todo)
@@ -985,6 +990,11 @@ fn cap<'a>(s: impl Into<String>) -> iced::widget::Text<'a> {
     text(s.into()).size(12).color(DIM)
 }
 
+/// 番が付いてからの時間。3 日 動きが無いものは、色を変えて印にする
+fn age_of<'a>(age: &str, stale: bool) -> iced::widget::Text<'a> {
+    cap(age.to_string()).color(if stale { BAD } else { DIM })
+}
+
 /// 線の枠の、押せる字。選ばれているものは明るく
 fn seg<'a>(label: String, on: bool, msg: Msg) -> Element<'a, Msg> {
     button(text(label).size(14).color(if on { TEXT } else { DIM }))
@@ -1098,7 +1108,7 @@ fn pr_card<'a>(
             .width(Length::Fill)
             .height(16)
             .clip(true),
-            cap(r.age.clone()),
+            age_of(&p.age, p.stale),
         ]
         .spacing(8),
         // 題は 2 行ぶんの高さに固定する。カードの形をそろえるため(続きは中身を開いて読む)
@@ -1267,7 +1277,7 @@ fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
                 cap(short(&v.repo).to_string()),
                 cap(r.why.clone()),
                 turn_of(r, &v.viewer, app.accent),
-                cap(r.age.clone()),
+                age_of(&r.age, r.stale),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -1361,7 +1371,7 @@ fn list_row<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> {
         .width(Length::Fill)
         .clip(true),
         container(turn_of(r, &v.viewer, app.accent)).width(110),
-        container(cap(r.age.clone())).width(48),
+        container(age_of(&r.age, r.stale)).width(48),
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -1455,12 +1465,12 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
             (turn.join(", "), false)
         }
     };
-    let why = |state: String, next: String| -> Element<'_, Msg> {
+    let why = |state: String, next: String, age: &str| -> Element<'_, Msg> {
         container(
-            text(if r.age.is_empty() {
+            text(if age.is_empty() || next == "no one" {
                 format!("{state} · Waiting on {next}")
             } else {
-                format!("{state} · Waiting on {next} · idle {}", r.age)
+                format!("{state} · Waiting on {next} for {age}")
             })
             .size(14)
             .color(TEXT)
@@ -1513,7 +1523,7 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                         .color(TEXT)
                         .wrapping(text::Wrapping::WordOrGlyph),
                 )
-                .push(why(p.why.clone(), next))
+                .push(why(p.why.clone(), next, &p.age))
                 .push(cap(format!("by {}", p.author)));
             if let Some(n) = notice_of(app) {
                 d = d.push(n);
@@ -1598,7 +1608,7 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                         .color(TEXT)
                         .wrapping(text::Wrapping::WordOrGlyph),
                 )
-                .push(why(r.why.clone(), next));
+                .push(why(r.why.clone(), next, &r.age));
             if let Some(n) = notice_of(app) {
                 d = d.push(n);
             }

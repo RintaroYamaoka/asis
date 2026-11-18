@@ -12,11 +12,11 @@ query($owner:String!,$name:String!){
   repository(owner:$owner,name:$name){
     nameWithOwner
     open: pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
-      number title body isDraft state mergeable baseRefName headRefName updatedAt mergedAt
+      number title body isDraft state mergeable baseRefName headRefName createdAt updatedAt mergedAt
       author{login __typename} reviewDecision
       reviewRequests(first:10){nodes{requestedReviewer{... on User{login}}}}
       commits(last:1){nodes{commit{committedDate statusCheckRollup{contexts(first:50){nodes{
-        __typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}
+        __typename ... on CheckRun{name status conclusion completedAt} ... on StatusContext{context state createdAt}
       }}}}}}
       closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
       comments(last:30){nodes{author{login __typename} createdAt}}
@@ -30,7 +30,7 @@ const REST_QUERY: &str = r#"
 query($owner:String!,$name:String!){
   repository(owner:$owner,name:$name){
     merged: pullRequests(states:MERGED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
-      number title body state baseRefName headRefName updatedAt mergedAt author{login __typename}
+      number title body state baseRefName headRefName createdAt updatedAt mergedAt author{login __typename}
       mergeCommit{oid}
       closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
     }}
@@ -255,7 +255,33 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
             people.push(author.clone());
         }
         let commit = &p["commits"]["nodes"][0]["commit"];
-        let (checks, failing) = checks(&commit["statusCheckRollup"]["contexts"], ignore_checks);
+        let contexts = &commit["statusCheckRollup"]["contexts"];
+        let (checks, failing) = checks(contexts, ignore_checks);
+        let pushed = commit["committedDate"].as_str().unwrap_or("");
+        let waiting_comment = first_unanswered(p, &author, pushed);
+        let decision = p["reviewDecision"].as_str().unwrap_or("");
+        let times = Times {
+            created: s(&p["createdAt"]),
+            pushed: pushed.to_string(),
+            checked: nodes(contexts)
+                .filter(|c| {
+                    let name = c["name"].as_str().or(c["context"].as_str()).unwrap_or("");
+                    !ignore_checks.iter().any(|i| i == name)
+                })
+                .filter_map(|c| c["completedAt"].as_str().or(c["createdAt"].as_str()))
+                .max()
+                .unwrap_or("")
+                .to_string(),
+            // 今の判定と同じ向きのレビューのうち、いちばん新しいもの
+            reviewed: nodes(&p["reviews"])
+                .filter(|r| !decision.is_empty() && r["state"] == decision)
+                .filter_map(|r| r["submittedAt"].as_str())
+                .max()
+                .unwrap_or("")
+                .to_string(),
+            commented: waiting_comment.unwrap_or("").to_string(),
+            merged: s(&p["mergedAt"]),
+        };
         prs.push(PrFacts {
             repo: repo.clone(),
             number: p["number"].as_u64()?,
@@ -281,11 +307,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
                 .map(|n| s(&n["requestedReviewer"]["login"]))
                 .filter(|l| !l.is_empty())
                 .collect(),
-            unanswered_comment: unanswered(
-                p,
-                &author,
-                commit["committedDate"].as_str().unwrap_or(""),
-            ),
+            unanswered_comment: waiting_comment.is_some(),
             shipped: is_shipped(p),
             closes: nodes(&p["closingIssuesReferences"])
                 .filter_map(|n| {
@@ -295,6 +317,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
                     })
                 })
                 .collect(),
+            times,
         });
         pr_updated.push(s(&p["updatedAt"]));
         pr_failing.push(failing);
@@ -419,7 +442,8 @@ fn checks(contexts: &Value, ignore: &[String]) -> (Checks, Vec<String>) {
 
 /// 最後の push と作者の最後の発言のあとに、作者以外の人(bot を除く)のコメントがある。
 /// 直しの依頼・承認は GitHub のレビューの判定で見るので、ここではコメントだけを数える。
-fn unanswered(p: &Value, author: &str, last_push: &str) -> bool {
+/// 返していないコメントがあれば、その最初の 1 つの時刻を返す。
+fn first_unanswered<'a>(p: &'a Value, author: &str, last_push: &str) -> Option<&'a str> {
     let events: Vec<(&str, &Value)> = nodes(&p["comments"])
         .filter_map(|c| Some((c["createdAt"].as_str()?, &c["author"])))
         .chain(
@@ -437,7 +461,9 @@ fn unanswered(p: &Value, author: &str, last_push: &str) -> bool {
     let since = author_last.max(last_push);
     events
         .iter()
-        .any(|(t, a)| *t > since && a["login"] != author && !is_bot(a) && a["login"].is_string())
+        .filter(|(t, a)| *t > since && a["login"] != author && !is_bot(a) && a["login"].is_string())
+        .map(|(t, _)| *t)
+        .min()
 }
 
 #[cfg(test)]
@@ -689,6 +715,36 @@ mod tests {
         // 読めなければ、PR を出したことのある人
         let f = parse(&repo(vec![pr(json!({}))], vec![], json!([])), &[]).unwrap();
         assert_eq!(f.people, vec!["ann"]);
+    }
+
+    #[test]
+    fn times_are_read_from_the_events() {
+        let p = pr(json!({
+            "createdAt": "2026-01-01T00:00:00Z",
+            "reviewDecision": "CHANGES_REQUESTED",
+            "commits": {"nodes": [{"commit": {"committedDate": "2026-01-01T10:00:00Z", "statusCheckRollup": {"contexts": {"nodes": [
+                {"__typename": "CheckRun", "name": "test", "status": "COMPLETED", "conclusion": "SUCCESS", "completedAt": "2026-01-01T10:05:00Z"},
+                {"__typename": "CheckRun", "name": "preview", "status": "COMPLETED", "conclusion": "FAILURE", "completedAt": "2026-01-01T11:00:00Z"}
+            ]}}}}]},
+            "reviews": {"nodes": [
+                {"author": {"login": "bob"}, "state": "APPROVED", "submittedAt": "2026-01-01T12:00:00Z"},
+                {"author": {"login": "bob"}, "state": "CHANGES_REQUESTED", "submittedAt": "2026-01-01T13:00:00Z"}
+            ]},
+            "comments": {"nodes": [
+                {"author": {"login": "bob", "__typename": "User"}, "createdAt": "2026-01-01T14:00:00Z"},
+                {"author": {"login": "bob", "__typename": "User"}, "createdAt": "2026-01-01T15:00:00Z"}
+            ]}
+        }));
+        let f = parse(&repo(vec![p], vec![], json!([])), &["preview".to_string()]).unwrap();
+        let t = &f.prs[0].times;
+        assert_eq!(t.created, "2026-01-01T00:00:00Z");
+        assert_eq!(t.pushed, "2026-01-01T10:00:00Z");
+        // 数えないチェックは、終わった時刻にも入れない
+        assert_eq!(t.checked, "2026-01-01T10:05:00Z");
+        // 今の判定と同じ向きのレビュー
+        assert_eq!(t.reviewed, "2026-01-01T13:00:00Z");
+        // 返していないコメントの、最初の 1 つ
+        assert_eq!(t.commented, "2026-01-01T14:00:00Z");
     }
 
     #[test]
