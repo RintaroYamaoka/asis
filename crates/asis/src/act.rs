@@ -159,7 +159,7 @@ fn explain(stderr: &str, stdout: &str) -> String {
 }
 
 fn gh(args: &[String]) -> Result<String, String> {
-    let out = crate::command("gh")
+    let out = crate::host::command("gh")
         .args(args)
         .output()
         .map_err(lang::no_gh)?;

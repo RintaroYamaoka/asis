@@ -5,6 +5,7 @@ pub mod act;
 pub mod config;
 pub mod extra;
 pub mod github;
+pub mod host;
 pub mod lang;
 pub mod local;
 pub mod room;
@@ -16,20 +17,6 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use view::{Filter, RepoView};
-
-/// 外のコマンド(gh・git など)を呼ぶ。
-/// Windows の窓のアプリから呼ぶと、呼ぶたびに黒い窓が一瞬 出るので、出さない印を付ける
-pub fn command(program: &str) -> std::process::Command {
-    #[allow(unused_mut)]
-    let mut c = std::process::Command::new(program);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        c.creation_flags(CREATE_NO_WINDOW);
-    }
-    c
-}
 
 const HELP: &str = "asis — development, as is
 
@@ -82,6 +69,22 @@ pub fn run() -> Result<(), String> {
         Some("login" | "logout" | "room")
     ) {
         return room::cli(&raw);
+    }
+    // `asis local <owner/repo>...`: この PC の上の作業を JSON で出す。
+    // Windows で開いた窓が、WSL の中の作業を知るために呼ぶ(人が打つためのものではない)
+    if raw.first().map(String::as_str) == Some("local") {
+        let roots: Vec<std::path::PathBuf> = config::load()
+            .map(|l| l.roots)
+            .unwrap_or_default()
+            .iter()
+            .map(|r| expand_home(r))
+            .collect();
+        let works = local::gather(&raw[1..], &roots);
+        println!(
+            "{}",
+            serde_json::to_string(&works).map_err(|e| e.to_string())?
+        );
+        return Ok(());
     }
     let mut args = raw.into_iter();
     while let Some(a) = args.next() {

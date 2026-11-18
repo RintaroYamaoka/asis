@@ -134,7 +134,7 @@ pub fn run(source: Source, filter: Filter) -> std::io::Result<()> {
 fn open(url: &str) {
     use std::process::Stdio;
     for opener in ["wslview", "xdg-open", "open"] {
-        if crate::command(opener)
+        if crate::host::local(opener)
             .arg(url)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -144,7 +144,7 @@ fn open(url: &str) {
             return;
         }
     }
-    let _ = crate::command("cmd")
+    let _ = crate::host::local("cmd")
         .args(["/C", "start", "", url])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

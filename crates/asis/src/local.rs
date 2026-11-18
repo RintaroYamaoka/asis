@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 /// ターミナルのペイン
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Pane {
     pub cwd: PathBuf,
     /// 動いている AI の名前。無ければ空
@@ -15,7 +15,7 @@ pub struct Pane {
 }
 
 /// 手元の worktree 1 つ
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Work {
     /// `owner/name`
     pub repo: String,
@@ -111,7 +111,9 @@ pub fn attach(mut works: Vec<Work>, panes: &[Pane]) -> Vec<Work> {
 
 fn panes() -> Vec<Pane> {
     // ターミナルの道具が無い・動いていないときは、ペイン無しとして進む。
-    let out = crate::command("herdr").args(["pane", "list"]).output();
+    let out = crate::host::command("herdr")
+        .args(["pane", "list"])
+        .output();
     let Ok(out) = out else { return vec![] };
     if !out.status.success() {
         return vec![];
@@ -123,7 +125,7 @@ fn panes() -> Vec<Pane> {
 
 /// その場所を含む repo の、いちばん上のフォルダ(worktree なら、その worktree の上)。
 fn toplevel(dir: &Path) -> Option<PathBuf> {
-    let out = crate::command("git")
+    let out = crate::host::command("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel"])
@@ -135,7 +137,7 @@ fn toplevel(dir: &Path) -> Option<PathBuf> {
 }
 
 fn origin(dir: &Path) -> Option<String> {
-    let out = crate::command("git")
+    let out = crate::host::command("git")
         .arg("-C")
         .arg(dir)
         .args(["remote", "get-url", "origin"])
@@ -148,8 +150,39 @@ fn origin(dir: &Path) -> Option<String> {
 }
 
 /// 見ている repo の、この PC の上の worktree を集める。
-/// 探す起点は、ペインが開いている場所・今の場所・設定の `roots` の直下のフォルダ。
+/// 仕事場が WSL の中なら(窓は Windows)、WSL の中の asis に集めさせる。
+/// フォルダを歩くのは、その中でないとできない。
 pub fn gather(repos: &[String], roots: &[PathBuf]) -> Vec<Work> {
+    if crate::host::wsl().is_some() {
+        return gather_in_wsl(repos);
+    }
+    gather_here(repos, roots)
+}
+
+/// WSL の中の `asis local` に集めさせて、返事を読む。WSL や asis が無ければ、手元の作業は無しとして進む。
+/// 探すフォルダ(`roots`)は、WSL の中の設定のものを使う。
+fn gather_in_wsl(repos: &[String]) -> Vec<Work> {
+    if repos.is_empty() {
+        return vec![];
+    }
+    // ログインのシェルを通す(asis の置き場が PATH に入るのは、そのときなので)
+    let out = crate::host::command("bash")
+        .args(["-lc", r#"asis local "$@""#, "asis"])
+        .args(repos)
+        .output();
+    match out {
+        Ok(out) if out.status.success() => works_of_json(&out.stdout),
+        _ => vec![],
+    }
+}
+
+/// `asis local` の返事を読む
+pub fn works_of_json(reply: &[u8]) -> Vec<Work> {
+    serde_json::from_slice(reply).unwrap_or_default()
+}
+
+/// 探す起点は、ペインが開いている場所・今の場所・設定の `roots` の直下のフォルダ。
+fn gather_here(repos: &[String], roots: &[PathBuf]) -> Vec<Work> {
     let panes = panes();
     let mut seeds: Vec<PathBuf> = panes.iter().map(|p| p.cwd.clone()).collect();
     seeds.extend(std::env::current_dir().ok());
@@ -180,7 +213,7 @@ pub fn gather(repos: &[String], roots: &[PathBuf]) -> Vec<Work> {
         let Some(repo) = origin(&top).filter(|r| repos.contains(r)) else {
             continue;
         };
-        let Ok(out) = crate::command("git")
+        let Ok(out) = crate::host::command("git")
             .arg("-C")
             .arg(&top)
             .args(["worktree", "list", "--porcelain"])
@@ -206,6 +239,25 @@ pub fn gather(repos: &[String], roots: &[PathBuf]) -> Vec<Work> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn works_survive_the_trip_through_json() {
+        let works = vec![Work {
+            repo: "o/r".into(),
+            path: "/home/a/r".into(),
+            branch: "12-x".into(),
+            panes: vec![Pane {
+                cwd: "/home/a/r/src".into(),
+                agent: "claude".into(),
+                status: "working".into(),
+                title: "t".into(),
+            }],
+        }];
+        let json = serde_json::to_vec(&works).unwrap();
+        assert_eq!(works_of_json(&json), works);
+        // 読めない返事は、手元の作業 無しとして進む
+        assert!(works_of_json(b"bash: asis: command not found").is_empty());
+    }
 
     #[test]
     fn repo_from_remote_urls() {

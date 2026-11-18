@@ -153,7 +153,7 @@ pub fn gh_state(ran: Result<(bool, String, String), std::io::ErrorKind>) -> Gh {
 /// gh が使えるか、誰としてログインしているかを聞く(GitHub に 1 回 聞く)
 pub fn whoami() -> Gh {
     gh_state(
-        crate::command("gh")
+        crate::host::command("gh")
             .args(["api", "user", "--jq", ".login"])
             .output()
             .map(|o| {
@@ -168,7 +168,7 @@ pub fn whoami() -> Gh {
 }
 
 fn ask(query: &str, owner: &str, name: &str) -> Result<Value, String> {
-    let out = crate::command("gh")
+    let out = crate::host::command("gh")
         .args(["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}")])
         .output()
         .map_err(|e| say!("gh を実行できません({e})。GitHub の公式コマンド gh を入れて `gh auth login` してください", "Cannot run gh ({e}). Install GitHub's official command gh and run `gh auth login`"))?;
@@ -390,7 +390,7 @@ pub fn stamps(repos: &[String]) -> Result<Vec<String>, String> {
         ));
     }
     query.push('}');
-    let out = crate::command("gh")
+    let out = crate::host::command("gh")
         .args(["api", "graphql", "-f", &format!("query={query}")])
         .output()
         .map_err(lang::no_gh)?;

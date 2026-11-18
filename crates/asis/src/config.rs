@@ -198,6 +198,10 @@ pub fn parse_color(text: &str) -> Option<[u8; 3]> {
 
 /// `$XDG_CONFIG_HOME/asis/config.toml`、無ければ `~/.config/asis/config.toml`(Windows は `%APPDATA%`)。
 pub fn path() -> Option<PathBuf> {
+    // 仕事場が WSL の中のとき、Windows の窓は、WSL の中の設定を読む(`ASIS_CONFIG_DIR`)
+    if let Some(dir) = std::env::var_os("ASIS_CONFIG_DIR").filter(|d| !d.is_empty()) {
+        return Some(PathBuf::from(dir).join("config.toml"));
+    }
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))

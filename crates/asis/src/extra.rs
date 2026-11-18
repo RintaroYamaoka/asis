@@ -69,7 +69,7 @@ fn encode_path(path: &str) -> String {
 }
 
 fn gh(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = crate::command("gh")
+    let out = crate::host::command("gh")
         .args(args)
         .output()
         .map_err(crate::lang::no_gh)?;
