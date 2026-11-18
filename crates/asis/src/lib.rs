@@ -63,7 +63,7 @@ pub struct Section {
 pub fn run() -> Result<(), String> {
     let mut repos = Vec::new();
     let (mut plain, mut filter, mut only) = (false, Filter::All, Vec::new());
-    let raw: Vec<String> = std::env::args().skip(1).collect();
+    let raw: Vec<String> = host::args();
     if matches!(
         raw.first().map(String::as_str),
         Some("login" | "logout" | "room")

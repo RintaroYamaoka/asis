@@ -56,24 +56,19 @@ pub fn hand_off_to_windows() -> Option<std::process::ExitStatus> {
         return None;
     }
     let exe = windows_exe()?;
-    let config = asis::config::path()
-        .and_then(|p| Some(windows_path(p.parent()?)))
-        .unwrap_or_default();
-    // Windows の側へ渡す変数は、名前を WSLENV に並べる
-    let mut pass = vec!["ASIS_WSL", "ASIS_CONFIG_DIR"];
-    pass.extend(
-        ["ASIS_TITLE", "ASIS_WINDOW", "ASIS_SCALE", "ASIS_POP"]
-            .into_iter()
-            .filter(|name| std::env::var_os(name).is_some()),
-    );
-    let wslenv = match std::env::var("WSLENV") {
-        Ok(now) if !now.is_empty() => format!("{now}:{}", pass.join(":")),
-        _ => pass.join(":"),
-    };
+    // 試すときの指定(窓の題・大きさ)は、Windows の側へも渡す
+    let pass: Vec<&str> = ["ASIS_TITLE", "ASIS_WINDOW", "ASIS_SCALE", "ASIS_POP"]
+        .into_iter()
+        .filter(|name| std::env::var_os(name).is_some())
+        .collect();
+    let wslenv = [std::env::var("WSLENV").unwrap_or_default(), pass.join(":")]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(":");
     std::process::Command::new(exe)
+        .args(["--wsl", &distro])
         .args(std::env::args_os().skip(1))
-        .env("ASIS_WSL", distro)
-        .env("ASIS_CONFIG_DIR", config)
         .env("WSLENV", wslenv)
         .status()
         .ok()
@@ -101,16 +96,6 @@ fn windows_exe() -> Option<std::path::PathBuf> {
     exe.push(name);
     exe.set_extension("exe");
     exe.is_file().then_some(exe)
-}
-
-/// WSL の中の場所を、Windows から見える書き方にする(`\\wsl.localhost\Ubuntu\home\…`)
-fn windows_path(path: &std::path::Path) -> String {
-    asis::host::local("wslpath")
-        .arg("-w")
-        .arg(path)
-        .output()
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_default()
 }
 
 /// Windows の道具。PATH に Windows の場所が無い開き方(メニューからなど)でも呼べるように、置き場でも探す

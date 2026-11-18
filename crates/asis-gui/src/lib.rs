@@ -205,7 +205,7 @@ fn load(loader: Arc<Mutex<Option<Loader>>>, force: bool) -> Task<Msg> {
         async move {
             let mut guard = loader.lock().map_err(|_| asis::lang::stopped())?;
             // `asis-gui owner/repo` と打てば、その repo だけを既定の決まりで開く
-            let repos: Vec<String> = std::env::args().skip(1).collect();
+            let repos: Vec<String> = asis::host::args();
             let rooms = if repos.is_empty() {
                 // 部屋は毎回 読み直す(招かれた部屋・変えた役割が、開いたまま入るように)
                 let local = asis::config::load()?;

@@ -40,6 +40,14 @@ powershell -ExecutionPolicy Bypass -File install.ps1
 
 zip は、Linux か WSL の上で `scripts/build-windows.sh` で作る。
 
+### WSL(仕事は WSL の中、窓は Windows)
+
+WSL の上で `scripts/install-windows.sh` を打つと、Windows 版を作って、その PC の Windows に入れる。
+入れたあとは、WSL で `asis-gui` と打っても、スタートメニューの「asis」からでも、Windows 版の窓が開く。
+gh のログイン・設定・手元の作業は、WSL の中のものをそのまま使う(窓だけが Windows で動く)。
+
+Windows 版を入れていなければ、WSL の中で窓が出る(`ASIS_BACKEND=wayland` でも)。
+
 ## 部屋
 
 repo・メンバー・役割を人と共有するときは、部屋を使う。部屋は DB(Supabase)に置く。DB に入るのは部屋の定義だけで、issue・PR・コードは入らない。

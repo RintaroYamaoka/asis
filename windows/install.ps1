@@ -1,17 +1,19 @@
-﻿# asis を Windows に入れる。このファイルと同じフォルダの asis-gui.exe・asis.exe を写して、スタートメニューに置く。
+﻿# asis を Windows に入れる。このファイルと同じフォルダの exe を写して、スタートメニューに「asis」を置く。
 # 使い方: このフォルダを右クリック →「ターミナルで開く」→  powershell -ExecutionPolicy Bypass -File install.ps1
 # 管理者の権限は要らない(自分のユーザーの中にだけ入れる)。消すときは uninstall.ps1。
+#   -Exe  スタートメニューから開く exe(既定は asis-gui.exe)
+#   -Wsl  仕事場が WSL の中のとき、その distro の名前(例: Ubuntu)。窓は Windows 版、gh や設定は WSL の中のものを使う
+param([string]$Exe = 'asis-gui.exe', [string]$Wsl = '')
 $ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:LOCALAPPDATA 'Programs\asis'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-foreach ($f in 'asis-gui.exe', 'asis.exe') {
-    Copy-Item -Force (Join-Path $PSScriptRoot $f) $dir
-}
+Copy-Item -Force (Join-Path $PSScriptRoot '*.exe') $dir
 
 # スタートメニューに「asis」を置く
 $menu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\asis.lnk'
 $link = (New-Object -ComObject WScript.Shell).CreateShortcut($menu)
-$link.TargetPath = Join-Path $dir 'asis-gui.exe'
+$link.TargetPath = Join-Path $dir $Exe
+$link.Arguments = if ($Wsl) { "--wsl $Wsl" } else { '' }
 $link.WorkingDirectory = $env:USERPROFILE
 $link.Save()
 
