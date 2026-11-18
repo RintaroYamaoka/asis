@@ -27,6 +27,8 @@ pub struct Room {
     pub id: String,
     pub name: String,
     pub repos: Vec<String>,
+    /// メンバーでない人の分も出す repo
+    pub everyone: Vec<String>,
     pub members: Vec<Member>,
     pub merge_by_author: bool,
     pub deploy_by_author: bool,
@@ -36,6 +38,7 @@ pub struct Room {
 #[derive(Deserialize)]
 struct RepoRow {
     repo: String,
+    everyone: bool,
 }
 
 #[derive(Deserialize)]
@@ -51,7 +54,7 @@ struct RawRoom {
 
 /// 部屋の一覧を聞くときの問い合わせ
 const ROOMS: &str = "/rest/v1/rooms?select=id,name,merge_by_author,deploy_by_author,ignore_checks,\
-room_repos(repo),room_members(github_id,login,is_admin,review,merge,deploy)&order=created_at";
+room_repos(repo,everyone),room_members(github_id,login,is_admin,review,merge,deploy)&order=created_at";
 
 pub fn parse_rooms(text: &str) -> Result<Vec<Room>, String> {
     let raw: Vec<RawRoom> =
@@ -59,6 +62,12 @@ pub fn parse_rooms(text: &str) -> Result<Vec<Room>, String> {
     Ok(raw
         .into_iter()
         .map(|r| {
+            let everyone = r
+                .room_repos
+                .iter()
+                .filter(|x| x.everyone)
+                .map(|x| x.repo.clone())
+                .collect();
             let mut repos: Vec<String> = r.room_repos.into_iter().map(|x| x.repo).collect();
             repos.sort();
             let mut members = r.room_members;
@@ -67,6 +76,7 @@ pub fn parse_rooms(text: &str) -> Result<Vec<Room>, String> {
                 id: r.id,
                 name: r.name,
                 repos,
+                everyone,
                 members,
                 merge_by_author: r.merge_by_author,
                 deploy_by_author: r.deploy_by_author,
@@ -102,8 +112,12 @@ impl Room {
         }
     }
 
-    /// この部屋で出す人。メンバーでない人の PR は出さない。
-    pub fn people(&self) -> Vec<String> {
+    /// この部屋の、その repo で出す人。空なら全員。
+    /// 既定はメンバーの分だけ。「全員」にした repo は、メンバーでない人の PR も出す。
+    pub fn people(&self, repo: &str) -> Vec<String> {
+        if self.everyone.iter().any(|r| r == repo) {
+            return Vec::new();
+        }
         self.members.iter().map(|m| m.login.clone()).collect()
     }
 }
@@ -498,7 +512,8 @@ const HELP: &str = "asis room — 部屋(repo・メンバー・役割をまと�
   asis logout                             ログインの記録を消す
   asis room                               入っている部屋を出す
   asis room new <部屋>                    部屋を作る(作った人が管理者)
-  asis room add <部屋> <owner/repo>       repo を足す
+  asis room add <部屋> <owner/repo>       repo を足す。メンバーの分だけ出す
+                                          --everyone を付けると、メンバーでない人の分も出す(足し直せば切り替わる)
   asis room drop <部屋> <owner/repo>      repo を外す
   asis room invite <部屋> <名前> [役割]   GitHub のアカウント名で招く。入っている人なら役割を変える
                                           役割: --review --merge --deploy --admin
@@ -525,7 +540,12 @@ pub fn rooms_text(rooms: &[Room]) -> String {
     for room in rooms {
         out.push_str(&format!("{}\n", room.name));
         for repo in &room.repos {
-            out.push_str(&format!("  repo      {repo}\n"));
+            let mark = if room.everyone.contains(repo) {
+                "  (全員の分を出す)"
+            } else {
+                ""
+            };
+            out.push_str(&format!("  repo      {repo}{mark}\n"));
         }
         if room.repos.is_empty() {
             out.push_str("  repo      (まだありません)\n");
@@ -577,7 +597,8 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         .collect();
     let flag = |name: &str| args.iter().any(|a| a == name);
     if let Some(bad) = args.iter().find(|a| {
-        a.starts_with("--") && !["--review", "--merge", "--deploy", "--admin"].contains(&a.as_str())
+        a.starts_with("--")
+            && !["--review", "--merge", "--deploy", "--admin", "--everyone"].contains(&a.as_str())
     }) {
         return Err(format!("知らない指定です: {bad}\n\n{HELP}"));
     }
@@ -612,8 +633,18 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             let id = &room.id;
             match (*action, rest) {
                 ("add", [repo]) => {
-                    let body = serde_json::json!({ "room_id": id, "repo": repo }).to_string();
-                    c.send("POST", "/rest/v1/room_repos", Some(&body))
+                    let body = serde_json::json!({
+                        "room_id": id, "repo": repo, "everyone": flag("--everyone"),
+                    })
+                    .to_string();
+                    c.http
+                        .send(
+                            "POST",
+                            "/rest/v1/room_repos?on_conflict=room_id,repo",
+                            Some(&c.token),
+                            Some(&body),
+                            Some("resolution=merge-duplicates,return=representation"),
+                        )
                         .map_err(|e| {
                             if e.contains("check") {
                                 format!("`{repo}` は owner/name の形ではありません")
@@ -716,7 +747,7 @@ mod tests {
     const SAMPLE: &str = r#"[{
       "id": "11111111-1111-1111-1111-111111111111", "name": "team",
       "merge_by_author": false, "deploy_by_author": true, "ignore_checks": ["Preview"],
-      "room_repos": [{"repo": "o/web"}, {"repo": "o/api"}],
+      "room_repos": [{"repo": "o/web", "everyone": true}, {"repo": "o/api", "everyone": false}],
       "room_members": [
         {"github_id": 2, "login": "bob", "is_admin": false, "review": false, "merge": false, "deploy": false},
         {"github_id": 1, "login": "Alice", "is_admin": true, "review": true, "merge": true, "deploy": false}
@@ -728,7 +759,9 @@ mod tests {
         let rooms = parse_rooms(SAMPLE).unwrap();
         let room = find(&rooms, "team").unwrap();
         assert_eq!(room.repos, vec!["o/api", "o/web"]);
-        assert_eq!(room.people(), vec!["Alice", "bob"]);
+        // 既定はメンバーの分だけ。「全員」にした repo は絞らない
+        assert_eq!(room.people("o/api"), vec!["Alice", "bob"]);
+        assert!(room.people("o/web").is_empty());
         let p = room.project();
         assert_eq!((p.name.as_str(), p.repos.len()), ("team", 2));
         assert_eq!(p.review, vec!["Alice"]);
@@ -815,7 +848,8 @@ mod tests {
     #[test]
     fn rooms_are_listed_with_roles() {
         let text = rooms_text(&parse_rooms(SAMPLE).unwrap());
-        assert!(text.contains("repo      o/api"), "{text}");
+        assert!(text.contains("repo      o/api\n"), "{text}");
+        assert!(text.contains("repo      o/web  (全員の分を出す)"), "{text}");
         assert!(
             text.lines()
                 .any(|l| l.contains("Alice") && l.matches('○').count() == 3),

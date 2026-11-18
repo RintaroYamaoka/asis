@@ -46,6 +46,8 @@ select pg_temp.fails($$insert into public.rooms (name) values ('raw')$$, '42501'
 insert into public.room_repos select room, 'acme/app' from pg_temp.ids;
 insert into public.room_members (room_id, github_id, login) select room, 102, 'bob' from pg_temp.ids;
 select pg_temp.fails($$insert into public.room_repos select room, 'not a repo' from pg_temp.ids$$, '23514');
+update public.room_repos set everyone = true where repo = 'acme/app';
+select pg_temp.count_is($$select 1 from public.room_repos where everyone$$, 1);
 
 -- 招かれた bob には部屋が見える。変えることも、自分の部屋を作ることもできない
 select pg_temp.act('00000000-0000-0000-0000-00000000000b');
@@ -56,9 +58,11 @@ select pg_temp.count_is('select 1 from public.room_members', 2);
 select pg_temp.fails($$insert into public.room_repos select room, 'acme/other' from pg_temp.ids$$, '42501');
 select pg_temp.fails($$insert into public.room_members (room_id, github_id, login) select room, 103, 'carol' from pg_temp.ids$$, '42501');
 update public.rooms set name = 'hacked';
+update public.room_repos set everyone = false;
 update public.room_members set is_admin = true where github_id = 102;
 delete from public.room_members where github_id = 101;
 select pg_temp.count_is($$select 1 from public.rooms where name='team'$$, 1);
+select pg_temp.count_is($$select 1 from public.room_repos where everyone$$, 1);
 select pg_temp.count_is($$select 1 from public.room_members where github_id=102 and not is_admin$$, 1);
 select pg_temp.count_is('select 1 from public.room_members', 2);
 

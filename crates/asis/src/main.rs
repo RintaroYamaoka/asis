@@ -180,11 +180,15 @@ fn add_rooms(source: &mut Source, rooms: &[room::Room], only_flag: &[String]) {
         for repo in &room.repos {
             source.watch.retain(|w| w != repo);
             let people = if only_flag.is_empty() {
-                room.people()
+                room.people(repo)
             } else {
                 only_flag.to_vec()
             };
-            source.only.insert(repo.clone(), people);
+            // 空は「全員」。絞り込みを置かない。
+            source.only.remove(repo);
+            if !people.is_empty() {
+                source.only.insert(repo.clone(), people);
+            }
         }
         source.local.push(room.project());
     }
@@ -467,7 +471,7 @@ mod tests {
     fn rooms_replace_watched_repos_and_show_only_members() {
         let rooms = room::parse_rooms(
             r#"[{"id":"1","name":"team","merge_by_author":false,"deploy_by_author":false,"ignore_checks":[],
-              "room_repos":[{"repo":"o/a"}],
+              "room_repos":[{"repo":"o/a","everyone":false},{"repo":"o/all","everyone":true}],
               "room_members":[{"github_id":1,"login":"alice","is_admin":true,"review":true,"merge":true,"deploy":true}]},
              {"id":"2","name":"empty","merge_by_author":false,"deploy_by_author":false,"ignore_checks":[],
               "room_repos":[],"room_members":[]}]"#,
@@ -475,7 +479,11 @@ mod tests {
         .unwrap();
         let mut source = Source {
             watch: vec!["o/a".into(), "o/b".into()],
-            only: [("o/a".to_string(), vec!["zed".to_string()])].into(),
+            only: [
+                ("o/a".to_string(), vec!["zed".to_string()]),
+                ("o/all".to_string(), vec!["zed".to_string()]),
+            ]
+            .into(),
             roots: vec![],
             local: vec![],
         };
@@ -485,6 +493,8 @@ mod tests {
         assert_eq!(source.local.len(), 1);
         assert_eq!(source.local[0].review, vec!["alice"]);
         assert_eq!(source.only["o/a"], vec!["alice"]);
+        // 「全員」にした repo は絞らない。手元の絞り込みが残っていても外す
+        assert!(!source.only.contains_key("o/all"));
         add_rooms(&mut source, &rooms, &["bob".to_string()]);
         assert_eq!(source.only["o/a"], vec!["bob"]);
     }
