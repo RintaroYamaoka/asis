@@ -43,6 +43,8 @@ struct App {
     filter: Filter,
     look: Look,
     selected: Option<Key>,
+    /// 選んだ行の中の、PR 1 本。None なら issue そのもの
+    pr: Option<u64>,
     /// 選んだ 1 件の中身を、前に大きく出しているか
     open: bool,
     /// issue を書いている途中の中身
@@ -69,7 +71,7 @@ enum Msg {
     Repo(Option<String>),
     Filter(Filter),
     Look(Look),
-    Select(Key),
+    Select(Key, Option<u64>),
     Close,
     Act(asis::act::Action),
     Acted(Result<String, String>),
@@ -136,6 +138,7 @@ fn boot() -> (App, Task<Msg>) {
         filter: Filter::All,
         look: Look::Board,
         selected: None,
+        pr: None,
         open: false,
         write: None,
         fixing: None,
@@ -196,8 +199,9 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Repo(repo) => app.repo = repo,
         Msg::Filter(f) => app.filter = f,
         Msg::Look(look) => app.look = look,
-        Msg::Select(key) => {
+        Msg::Select(key, pr) => {
             app.selected = Some(key);
+            app.pr = pr;
             app.open = true;
             forget(app);
         }
@@ -274,10 +278,24 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             }
             // 字を打っている間・中身を出している間は、Esc だけを受ける(打った字を奪わない)
             if app.write.is_some() || app.open {
-                if key == KeyCode::Named(Named::Escape) {
-                    app.open = false;
-                    app.write = None;
-                    forget(app);
+                match key.as_ref() {
+                    KeyCode::Named(Named::Escape) => {
+                        app.open = false;
+                        app.write = None;
+                        forget(app);
+                    }
+                    // 同じ issue の、前の PR・次の PR へ(字を打っている間は動かさない)
+                    KeyCode::Named(Named::ArrowRight)
+                        if app.fixing.is_none() && app.write.is_none() =>
+                    {
+                        turn_pr(app, 1)
+                    }
+                    KeyCode::Named(Named::ArrowLeft)
+                        if app.fixing.is_none() && app.write.is_none() =>
+                    {
+                        turn_pr(app, -1)
+                    }
+                    _ => {}
                 }
                 return Task::none();
             }
@@ -293,16 +311,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 }
                 KeyCode::Named(Named::ArrowDown) => step(app, 1),
                 KeyCode::Named(Named::ArrowUp) => step(app, -1),
-                // 1 回目で中身を出す。出ているときは GitHub を開く
-                KeyCode::Named(Named::Enter) => {
-                    if !app.open {
-                        app.open = app.selected.is_some();
-                    } else if let Some(url) = current(app).map(|(_, r)| r.url.clone()) {
-                        if !url.is_empty() {
-                            open(&url);
-                        }
-                    }
-                }
+                // 中身を出す
+                KeyCode::Named(Named::Enter) => app.open = app.selected.is_some(),
                 KeyCode::Character("j") => step(app, 1),
                 KeyCode::Character("k") => step(app, -1),
                 KeyCode::Character("c") => return update(app, Msg::WriteOpen),
@@ -390,27 +400,48 @@ fn items(app: &App) -> Vec<Item<'_>> {
         .collect()
 }
 
-/// 絞り込みまで当てて、画面に出る順に並べたもの(上下キーはこの順で動く)
-fn ordered(app: &App) -> Vec<Item<'_>> {
-    let shown: Vec<Item<'_>> = items(app)
+/// 絞り込みまで当てたもの
+fn shown(app: &App) -> Vec<Item<'_>> {
+    items(app)
         .into_iter()
         .filter(|(v, r)| r.shows(app.filter, &v.viewer))
-        .collect();
-    let order: Vec<usize> = match app.look {
-        Look::Board => (0..4).collect(),
-        Look::List => LIST_ORDER.to_vec(),
-    };
+        .collect()
+}
+
+/// issue の段。人の手が要る順(In review → Merged → In progress → Todo)
+fn lanes<'a>(shown: &[Item<'a>]) -> Vec<Item<'a>> {
     let mut out = Vec::new();
-    for loose in [false, true] {
-        for col in &order {
-            out.extend(
-                shown
-                    .iter()
-                    .filter(|(_, r)| (r.kind == Kind::Pr) == loose && column_of(r.stage) == *col),
-            );
-        }
+    for col in LIST_ORDER {
+        out.extend(
+            shown
+                .iter()
+                .filter(|(_, r)| r.kind != Kind::Pr && column_of(r.stage) == col),
+        );
     }
     out
+}
+
+/// issue につながっていない PR。列の順
+fn loose<'a>(shown: &[Item<'a>]) -> Vec<Item<'a>> {
+    let mut out = Vec::new();
+    for col in 0..4 {
+        out.extend(
+            shown
+                .iter()
+                .filter(|(_, r)| r.kind == Kind::Pr && column_of(r.stage) == col),
+        );
+    }
+    out
+}
+
+/// PR 1 本が入る列。出さないもの(本番に出た・閉じた)は None
+fn column_of_pr(mark: &str) -> Option<usize> {
+    match mark {
+        "…" | "!" | "~" => Some(1),
+        "?" | "+" => Some(2),
+        "↑" => Some(3),
+        _ => None,
+    }
 }
 
 fn key_of(view: &RepoView, row: &Row) -> Key {
@@ -422,20 +453,46 @@ fn current(app: &App) -> Option<Item<'_>> {
     items(app).into_iter().find(|(v, r)| key_of(v, r) == *sel)
 }
 
+/// 上下キーで、次の 1 件へ。issue の段 → つながっていない PR、の順
 fn step(app: &mut App, by: i32) {
-    let list: Vec<Key> = ordered(app).iter().map(|(v, r)| key_of(v, r)).collect();
+    let all = shown(app);
+    let list: Vec<(Key, Option<u64>)> = lanes(&all)
+        .iter()
+        .map(|(v, r)| (key_of(v, r), None))
+        .chain(
+            loose(&all)
+                .iter()
+                .map(|(v, r)| (key_of(v, r), Some(r.number))),
+        )
+        .collect();
     if list.is_empty() {
         return;
     }
     let at = app
         .selected
         .as_ref()
-        .and_then(|s| list.iter().position(|k| k == s));
+        .and_then(|s| list.iter().position(|(k, _)| k == s));
     let next = match at {
         Some(i) => (i as i32 + by).clamp(0, list.len() as i32 - 1) as usize,
         None => 0,
     };
-    app.selected = Some(list[next].clone());
+    app.selected = Some(list[next].0.clone());
+    app.pr = list[next].1;
+}
+
+/// 同じ issue の中で、前の PR・次の PR へ
+fn turn_pr(app: &mut App, by: i32) {
+    let Some((_, r)) = current(app) else {
+        return;
+    };
+    let numbers: Vec<u64> = r.prs.iter().map(|p| p.number).collect();
+    let Some(at) = app.pr.and_then(|n| numbers.iter().position(|x| *x == n)) else {
+        return;
+    };
+    let n = numbers.len() as i32;
+    let next = numbers[((at as i32 + by).rem_euclid(n)) as usize];
+    app.pr = Some(next);
+    forget(app);
 }
 
 fn short(repo: &str) -> &str {
@@ -556,211 +613,353 @@ fn turn_of<'a>(row: &Row, viewer: &str, accent: Color) -> iced::widget::Text<'a>
     }
 }
 
-fn chips<'a>(row: &Row) -> Element<'a, Msg> {
-    let mut line = row![].spacing(5);
-    for p in row.prs.iter().take(4) {
-        let bad = p.mark == "!";
-        line = line.push(
-            container(text(word_of(p)).size(12).color(if bad { BAD } else { DIM }))
-                .padding([1, 7])
-                .style(boxed(
-                    if bad {
-                        Color::from_rgb(0.35, 0.18, 0.16)
-                    } else {
-                        LINE2
-                    },
-                    Color::TRANSPARENT,
-                )),
-        );
-    }
-    line.wrap().into()
+fn chip<'a>(p: &asis::view::PrLine) -> Element<'a, Msg> {
+    let bad = p.mark == "!";
+    container(text(word_of(p)).size(12).color(if bad { BAD } else { DIM }))
+        .padding([1, 7])
+        .style(boxed(
+            if bad {
+                Color::from_rgb(0.35, 0.18, 0.16)
+            } else {
+                LINE2
+            },
+            Color::TRANSPARENT,
+        ))
+        .into()
 }
 
-/// 1 件。自分の番は枠を色に、選んでいるものは明るい灰色の枠に
-fn card<'a>(app: &App, v: &'a RepoView, r: &'a Row, wide: bool) -> Element<'a, Msg> {
+const FRAME: Color = Color::from_rgb(0.165, 0.173, 0.165);
+
+/// 押せる枠。自分の番は枠を色に、選んでいるものは明るい灰色の枠に
+fn pressable<'a>(
+    body: Element<'a, Msg>,
+    line: Color,
+    on: bool,
+    pad: [u16; 2],
+    msg: Msg,
+) -> Element<'a, Msg> {
+    mouse_area(
+        container(body)
+            .padding(pad)
+            .width(Length::Fill)
+            .style(boxed(line, if on { PANEL } else { Color::TRANSPARENT })),
+    )
+    .on_press(msg)
+    .into()
+}
+
+/// カード = PR 1 本。細く、縦に
+fn pr_card<'a>(
+    app: &App,
+    v: &'a RepoView,
+    r: &'a Row,
+    p: &'a asis::view::PrLine,
+) -> Element<'a, Msg> {
     let key = key_of(v, r);
-    let on = app.selected.as_ref() == Some(&key);
-    let mine = r.is_mine(&v.viewer);
+    let on = app.selected.as_ref() == Some(&key) && app.pr == Some(p.number);
+    let mine = p.turn.contains(&v.viewer);
     let line = if mine {
         app.accent
     } else if on {
         BRIGHT
     } else {
-        Color::from_rgb(0.165, 0.173, 0.165)
+        FRAME
     };
-    let head = row![
-        container(
-            cap(format!("{} · {}", label_of(r), short(&v.repo))).wrapping(text::Wrapping::None)
-        )
-        .width(Length::Fill)
-        .height(16)
-        .clip(true),
-        cap(r.age.clone()),
-    ]
-    .spacing(8);
-    let now = now_of(r);
-    let body: Element<'a, Msg> = if wide {
-        // リストの 1 行
+    let body = column![
         row![
-            container(cap(label_of(r))).width(64),
-            column![
-                text(r.title.clone())
-                    .size(15)
-                    .color(TEXT)
-                    .wrapping(text::Wrapping::None),
-                row![cap(short(&v.repo).to_string()), chips(r), cap(now)]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-            ]
-            .spacing(5)
-            .width(Length::Fill)
-            .clip(true),
-            container(turn_of(r, &v.viewer, app.accent)).width(110),
-            container(cap(r.age.clone())).width(48),
-        ]
-        .spacing(12)
-        .align_y(Alignment::Center)
-        .into()
-    } else {
-        let mut c = column![
-            head,
-            // 題は 3 行まで。長い題でカードが縦に伸びないように
             container(
-                text(r.title.clone())
-                    .size(14)
-                    .color(TEXT)
-                    .wrapping(text::Wrapping::WordOrGlyph)
+                cap(format!("{} #{}", short(&v.repo), p.number)).wrapping(text::Wrapping::None)
             )
-            .max_height(56)
-            .clip(true),
-        ]
-        .spacing(6);
-        if !r.prs.is_empty() {
-            c = c.push(chips(r));
-        }
-        c.push(
-            row![
-                container(cap(now).wrapping(text::Wrapping::None))
-                    .width(Length::Fill)
-                    .height(16)
-                    .clip(true),
-                turn_of(r, &v.viewer, app.accent),
-            ]
-            .spacing(8),
-        )
-        .into()
-    };
-    let mut area = mouse_area(
-        container(body)
-            .padding(if wide { [9, 14] } else { [11, 12] })
             .width(Length::Fill)
-            .style(boxed(line, if on { PANEL } else { Color::TRANSPARENT })),
+            .height(16)
+            .clip(true),
+            cap(r.age.clone()),
+        ]
+        .spacing(8),
+        // 題は 3 行ぶんの高さに固定する。カードの形をそろえるため
+        container(
+            text(p.title.clone())
+                .size(14)
+                .color(TEXT)
+                .wrapping(text::Wrapping::WordOrGlyph)
+        )
+        .height(58)
+        .clip(true),
+        chip(p),
+        row![
+            container(cap(p.author.clone()).wrapping(text::Wrapping::None))
+                .width(Length::Fill)
+                .height(16)
+                .clip(true),
+            if mine {
+                text("あなた").size(13).color(app.accent)
+            } else if p.turn.is_empty() {
+                text("—").size(13).color(DIM)
+            } else {
+                text(p.turn.join("・")).size(13).color(DIM)
+            },
+        ]
+        .spacing(8),
+    ]
+    .spacing(7);
+    pressable(
+        body.into(),
+        line,
+        on,
+        [11, 12],
+        Msg::Select(key, Some(p.number)),
     )
-    .on_press(Msg::Select(key));
-    if !r.url.is_empty() {
-        area = area.on_double_click(Msg::Open(r.url.clone()));
-    }
-    area.into()
 }
 
-/// 真ん中:ボードかリスト。issue につながっていない PR は別の段。
-/// `width` は、いま使える幅。列の幅は 250〜330 に収め、入りきらなければ横に送る
-/// (画面の形が変わっても、カードの形が変わりすぎないように)。
+/// PR がまだ無い issue の、点線の代わりの 1 枚
+fn todo_card<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> {
+    let key = key_of(v, r);
+    let mine = r.is_mine(&v.viewer);
+    let local = r.local.first().map(|l| l.branch.clone());
+    let body = column![
+        cap(match (&local, r.kind) {
+            (Some(b), _) => format!("手元: {b}"),
+            (None, _) if r.stage == Stage::Doing => "ブランチあり・PR はまだ".to_string(),
+            _ => "PR はまだ".to_string(),
+        }),
+        row![
+            Space::new().width(Length::Fill),
+            turn_of(r, &v.viewer, app.accent)
+        ],
+    ]
+    .spacing(14);
+    pressable(
+        body.into(),
+        if mine { app.accent } else { FRAME },
+        false,
+        [11, 12],
+        Msg::Select(key, None),
+    )
+}
+
+/// 真ん中:ボードかリスト。
+/// ボードは、issue ごとに段を分け、その issue の PR を状態の列に 1 枚ずつ置く。
+/// issue につながっていない PR は、一番下の段。列の幅は 190〜236 に収める。
 fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
-    let shown: Vec<Item<'a>> = items(app)
-        .into_iter()
-        .filter(|(v, r)| r.shows(app.filter, &v.viewer))
-        .collect();
-    let col_w = ((width - 44.0 - 42.0) / 4.0).clamp(250.0, 330.0);
-    let band = |loose: bool| -> Vec<Item<'_>> {
-        shown
-            .iter()
-            .copied()
-            .filter(|(_, r)| (r.kind == Kind::Pr) == loose)
-            .collect()
-    };
-    let mut body = column![].spacing(10).padding([14, 22]);
-    for (loose, title) in [(false, ""), (true, "issue につながっていない PR")] {
-        let rows = band(loose);
-        if rows.is_empty() {
-            continue;
+    let all = shown(app);
+    let tasks = lanes(&all);
+    let free = loose(&all);
+    if all.is_empty() {
+        return container(cap(if app.loading {
+            "GitHub から読んでいます…"
+        } else {
+            "出すものがありません"
+        }))
+        .center(Length::Fill)
+        .into();
+    }
+    if app.look == Look::List {
+        let mut body = column![].spacing(8).padding([14, 22]).width(Length::Fill);
+        for (i, name) in LIST_ORDER.map(|i| (i, COLUMNS[i])) {
+            let here: Vec<&Item<'_>> = tasks
+                .iter()
+                .filter(|(_, r)| column_of(r.stage) == i)
+                .collect();
+            if here.is_empty() {
+                continue;
+            }
+            body = body.push(
+                row![text(name).size(13).color(TEXT), cap(here.len().to_string())]
+                    .spacing(9)
+                    .padding([6, 0]),
+            );
+            for (v, r) in here {
+                body = body.push(list_row(app, v, r));
+            }
         }
-        if !title.is_empty() {
+        if !free.is_empty() {
             body = body.push(
                 row![
-                    text(title).size(13).color(TEXT),
-                    cap(rows.len().to_string())
+                    text("issue につながっていない PR").size(13).color(TEXT),
+                    cap(free.len().to_string())
                 ]
                 .spacing(9)
                 .padding([10, 0]),
             );
-        }
-        match app.look {
-            Look::Board => {
-                let mut cols = row![].spacing(14);
-                for (i, name) in COLUMNS.iter().enumerate() {
-                    let mut col = column![].spacing(9).width(col_w);
-                    let here: Vec<&Item<'_>> = rows
-                        .iter()
-                        .filter(|(_, r)| column_of(r.stage) == i)
-                        .collect();
-                    col = col.push(
-                        row![
-                            text(*name).size(13).color(TEXT),
-                            cap(here.len().to_string())
-                        ]
-                        .spacing(8),
-                    );
-                    col = col.push(rule());
-                    for (v, r) in here {
-                        col = col.push(card(app, v, r, false));
-                    }
-                    cols = cols.push(col);
-                }
-                body = body.push(cols);
-            }
-            Look::List => {
-                for i in LIST_ORDER {
-                    let here: Vec<&Item<'_>> = rows
-                        .iter()
-                        .filter(|(_, r)| column_of(r.stage) == i)
-                        .collect();
-                    if here.is_empty() {
-                        continue;
-                    }
-                    body = body.push(
-                        row![
-                            text(COLUMNS[i]).size(13).color(TEXT),
-                            cap(here.len().to_string())
-                        ]
-                        .spacing(9)
-                        .padding([6, 0]),
-                    );
-                    for (v, r) in here {
-                        body = body.push(card(app, v, r, true));
-                    }
-                }
+            for (v, r) in &free {
+                body = body.push(list_row(app, v, r));
             }
         }
-    }
-    if shown.is_empty() && !app.loading {
-        body = body.push(container(cap("出すものがありません")).padding(40));
+        return scrollable(body)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
     }
 
-    match app.look {
-        Look::Board => scrollable(body)
-            .direction(scrollable::Direction::Both {
-                vertical: scrollable::Scrollbar::default(),
-                horizontal: scrollable::Scrollbar::default(),
+    let col_w = ((width - 44.0 - 42.0) / 4.0).clamp(190.0, 236.0);
+    let cells = |mut pick: Box<dyn FnMut(usize) -> Element<'a, Msg> + 'a>| -> Element<'a, Msg> {
+        let mut r = row![].spacing(14);
+        for i in 0..4 {
+            r = r.push(container(pick(i)).width(col_w));
+        }
+        r.into()
+    };
+    // 列の見出し。数字は、その列にあるカードの枚数(先に数えておく)
+    let totals: [usize; 4] = std::array::from_fn(|i| {
+        let in_tasks: usize = tasks
+            .iter()
+            .map(|(_, r)| {
+                if r.prs.iter().all(|p| column_of_pr(p.mark).is_none()) {
+                    usize::from(column_of(r.stage) == i)
+                } else {
+                    r.prs
+                        .iter()
+                        .filter(|p| column_of_pr(p.mark) == Some(i))
+                        .count()
+                }
             })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        Look::List => scrollable(body.width(Length::Fill))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+            .sum();
+        in_tasks + free.iter().filter(|(_, r)| column_of(r.stage) == i).count()
+    });
+    let head = cells(Box::new(move |i| {
+        column![
+            row![
+                text(COLUMNS[i]).size(13).color(TEXT),
+                cap(totals[i].to_string())
+            ]
+            .spacing(8),
+            rule(),
+        ]
+        .spacing(8)
+        .into()
+    }));
+    let mut body = column![].spacing(0).width(Length::Fill);
+    for (v, r) in &tasks {
+        let (v, r) = (*v, *r);
+        let key = key_of(v, r);
+        let on = app.selected.as_ref() == Some(&key) && app.pr.is_none();
+        // 段の頭 = issue 1 件
+        let lane_head = button(
+            row![
+                cap(label_of(r)),
+                container(
+                    text(r.title.clone())
+                        .size(15)
+                        .color(TEXT)
+                        .wrapping(text::Wrapping::None)
+                )
+                .width(Length::Fill)
+                .height(20)
+                .clip(true),
+                cap(short(&v.repo).to_string()),
+                cap(r.why.clone()),
+                turn_of(r, &v.viewer, app.accent),
+                cap(r.age.clone()),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .padding([9, 22])
+        .width(Length::Fill)
+        .style(move |_, status| button::Style {
+            background: Some(
+                if on || matches!(status, button::Status::Hovered) {
+                    PANEL
+                } else {
+                    Color::TRANSPARENT
+                }
+                .into(),
+            ),
+            text_color: TEXT,
+            ..button::Style::default()
+        })
+        .on_press(Msg::Select(key, None));
+        let has_cards = r.prs.iter().any(|p| column_of_pr(p.mark).is_some());
+        let lane = cells(Box::new(move |i| {
+            let mut c = column![].spacing(9);
+            for p in r.prs.iter().filter(|p| column_of_pr(p.mark) == Some(i)) {
+                c = c.push(pr_card(app, v, r, p));
+            }
+            if !has_cards && column_of(r.stage) == i {
+                c = c.push(todo_card(app, v, r));
+            }
+            c.into()
+        }));
+        body = body
+            .push(lane_head)
+            .push(container(lane).padding([2, 22]))
+            .push(Space::new().height(10))
+            .push(rule());
     }
+    if !free.is_empty() {
+        body = body.push(
+            container(
+                row![
+                    text("issue につながっていない PR").size(13).color(TEXT),
+                    cap(free.len().to_string())
+                ]
+                .spacing(9),
+            )
+            .padding([12, 22]),
+        );
+        let free2 = free.clone();
+        let lane = cells(Box::new(move |i| {
+            let mut c = column![].spacing(9);
+            for (v, r) in free2.iter().filter(|(_, r)| column_of(r.stage) == i) {
+                if let Some(p) = r.prs.first() {
+                    c = c.push(pr_card(app, v, r, p));
+                }
+            }
+            c.into()
+        }));
+        body = body
+            .push(container(lane).padding([2, 22]))
+            .push(Space::new().height(14));
+    }
+    column![
+        container(head).padding([14, 22]),
+        scrollable(body).width(Length::Fill).height(Length::Fill),
+    ]
+    .into()
+}
+
+/// リストの 1 行(issue 1 件か、つながっていない PR 1 本)
+fn list_row<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> {
+    let key = key_of(v, r);
+    let on = app.selected.as_ref() == Some(&key);
+    let mine = r.is_mine(&v.viewer);
+    let pr = (r.kind == Kind::Pr).then_some(r.number);
+    let mut chips = row![].spacing(5);
+    for p in r.prs.iter().take(4) {
+        chips = chips.push(chip(p));
+    }
+    let body = row![
+        container(cap(label_of(r))).width(64),
+        column![
+            text(r.title.clone())
+                .size(15)
+                .color(TEXT)
+                .wrapping(text::Wrapping::None),
+            row![cap(short(&v.repo).to_string()), chips, cap(now_of(r))]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(5)
+        .width(Length::Fill)
+        .clip(true),
+        container(turn_of(r, &v.viewer, app.accent)).width(110),
+        container(cap(r.age.clone())).width(48),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    pressable(
+        body.into(),
+        if mine {
+            app.accent
+        } else if on {
+            BRIGHT
+        } else {
+            FRAME
+        },
+        on,
+        [9, 14],
+        Msg::Select(key, pr),
+    )
 }
 
 /// 押してほしいボタン。色の線の枠
@@ -824,91 +1023,85 @@ fn notice_of<'a>(app: &App) -> Option<Element<'a, Msg>> {
     })
 }
 
-/// 選んだ 1 件の中身。前に大きく出す。操作は求めないが、ここでできる
+/// 選んだ 1 件の中身。前に大きく出す。
+/// 段の頭を押したら issue 1 件、カードを押したら PR 1 本。操作は PR 1 本の中でする。
 fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
     let (v, r) = current(app)?;
-    let next = if r.is_mine(&v.viewer) {
-        "あなた".to_string()
-    } else if r.turn.is_empty() {
-        "だれでもない".to_string()
-    } else {
-        r.turn.join("・")
+    let key = key_of(v, r);
+    let me = |turn: &[String]| -> (String, bool) {
+        if turn.contains(&v.viewer) {
+            ("あなた".to_string(), true)
+        } else if turn.is_empty() {
+            ("だれでもない".to_string(), false)
+        } else {
+            (turn.join("・"), false)
+        }
     };
-    let frame = Color::from_rgb(0.165, 0.173, 0.165);
-    let mut d = column![
-        cap(format!("{} · {}", v.repo, label_of(r))),
-        text(r.title.clone())
-            .size(20)
-            .color(TEXT)
-            .wrapping(text::Wrapping::WordOrGlyph),
+    let why = |state: String, next: String| -> Element<'_, Msg> {
         container(
             text(if r.age.is_empty() {
-                format!("{}。次は {next}。", r.why)
+                format!("{state}。次は {next}。")
             } else {
-                format!("{}。次は {next}。{} 動いていない。", r.why, r.age)
+                format!("{state}。次は {next}。{} 動いていない。", r.age)
             })
             .size(14)
             .color(TEXT)
-            .wrapping(text::Wrapping::WordOrGlyph)
+            .wrapping(text::Wrapping::WordOrGlyph),
         )
         .padding([12, 14])
         .width(Length::Fill)
-        .style(boxed(frame, Color::TRANSPARENT)),
-    ]
-    .spacing(14);
-    if let Some(n) = notice_of(app) {
-        d = d.push(n);
-    }
-    if !r.prs.is_empty() {
-        d = d.push(cap("PR"));
-    }
-    for p in &r.prs {
-        let mine = p.turn.contains(&v.viewer);
-        let mut one = column![
-            row![
-                cap(format!("#{}", p.number)),
-                text(p.why.clone())
-                    .size(12)
-                    .color(if p.mark == "!" { BAD } else { DIM }),
-                Space::new().width(Length::Fill),
-                text(if mine {
-                    "あなた".to_string()
-                } else {
-                    p.turn.join("・")
-                })
-                .size(13)
-                .color(if mine { app.accent } else { DIM }),
-            ]
-            .spacing(8),
-            text(p.title.clone())
-                .size(15)
-                .color(TEXT)
-                .wrapping(text::Wrapping::WordOrGlyph),
-            cap(p.author.clone()),
-        ]
-        .spacing(6);
-        // その PR の今の事実で、できる操作だけを出す
-        let repo = v.repo.clone();
-        let number = p.number;
-        let free = !app.busy;
-        if p.mark == "?" {
-            if app.fixing == Some(number) {
-                let send = Msg::Act(asis::act::Action::RequestChanges {
-                    repo,
-                    number,
-                    comment: app.comment.clone(),
-                });
-                one = one.push(
-                    row![
-                        field("何を直すかを一言", &app.comment, Msg::Comment, send.clone()),
-                        primary("Request changes", app.accent, free.then_some(send)),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                );
+        .style(boxed(FRAME, Color::TRANSPARENT))
+        .into()
+    };
+    let at = app
+        .pr
+        .and_then(|n| r.prs.iter().position(|p| p.number == n));
+    let mut d = column![].spacing(14);
+    match at {
+        // ---- PR 1 本 ----
+        Some(at) => {
+            let p = &r.prs[at];
+            let (next, _) = me(&p.turn);
+            let mut top = row![cap(format!("{} · PR #{}", v.repo, p.number))]
+                .spacing(10)
+                .align_y(Alignment::Center);
+            if r.kind == Kind::Task {
+                top = top.push(seg(
+                    format!("issue #{}", r.number),
+                    false,
+                    Msg::Select(key.clone(), None),
+                ));
             } else {
-                // 1 人の repo では、承認なしで自分の PR を取り込む。その道も出す(2 回 押して進む)
-                let merge = if app.confirm == Some(number) {
+                top = top.push(cap("issue なし"));
+            }
+            top = top.push(Space::new().width(Length::Fill));
+            let n = r.prs.len();
+            if n > 1 {
+                let go = |by: usize| Msg::Select(key.clone(), Some(r.prs[(at + by) % n].number));
+                top = top
+                    .push(seg("‹".into(), false, go(n - 1)))
+                    .push(cap(format!("{} / {n}", at + 1)))
+                    .push(seg("›".into(), false, go(1)));
+            }
+            d = d
+                .push(top)
+                .push(
+                    text(p.title.clone())
+                        .size(20)
+                        .color(TEXT)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                )
+                .push(why(p.why.clone(), next))
+                .push(cap(format!("{} が出した", p.author)));
+            if let Some(n) = notice_of(app) {
+                d = d.push(n);
+            }
+            // その PR の今の事実で、できる操作だけを出す
+            let repo = v.repo.clone();
+            let number = p.number;
+            let free = !app.busy;
+            let merge = |strong: bool| -> Element<'_, Msg> {
+                if app.confirm == Some(number) {
                     primary(
                         "Confirm merge",
                         app.accent,
@@ -917,59 +1110,136 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                             number,
                         })),
                     )
+                } else if strong {
+                    primary("Merge", app.accent, Some(Msg::AskMerge(number)))
                 } else {
                     seg("Merge".into(), false, Msg::AskMerge(number))
-                };
-                one = one.push(
-                    row![
-                        primary(
-                            "Approve",
-                            app.accent,
-                            free.then_some(Msg::Act(asis::act::Action::Approve { repo, number }))
-                        ),
-                        seg("Request changes…".into(), false, Msg::AskFix(number)),
-                        merge,
-                    ]
-                    .spacing(8),
+                }
+            };
+            if p.mark == "?" {
+                if app.fixing == Some(number) {
+                    let send = Msg::Act(asis::act::Action::RequestChanges {
+                        repo: repo.clone(),
+                        number,
+                        comment: app.comment.clone(),
+                    });
+                    d = d.push(
+                        row![
+                            field("何を直すかを一言", &app.comment, Msg::Comment, send.clone()),
+                            primary("Request changes", app.accent, free.then_some(send)),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    );
+                } else {
+                    d = d.push(
+                        row![
+                            primary(
+                                "Approve",
+                                app.accent,
+                                free.then_some(Msg::Act(asis::act::Action::Approve {
+                                    repo: repo.clone(),
+                                    number
+                                }))
+                            ),
+                            seg("Request changes…".into(), false, Msg::AskFix(number)),
+                            merge(false),
+                        ]
+                        .spacing(8),
+                    );
+                }
+            } else if p.mark == "+" {
+                d = d.push(merge(true));
+            }
+            for l in &r.local {
+                d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
+            }
+            d = d.push(seg(
+                format!("PR #{number} を GitHub で開く"),
+                false,
+                Msg::Open(format!("https://github.com/{}/pull/{number}", v.repo)),
+            ));
+        }
+        // ---- issue 1 件(手元の作業の行も、ここ)----
+        None => {
+            let (next, _) = me(&r.turn);
+            d = d
+                .push(cap(format!("{} · {}", v.repo, label_of(r))))
+                .push(
+                    text(r.title.clone())
+                        .size(20)
+                        .color(TEXT)
+                        .wrapping(text::Wrapping::WordOrGlyph),
+                )
+                .push(why(r.why.clone(), next));
+            if let Some(n) = notice_of(app) {
+                d = d.push(n);
+            }
+            if r.kind == Kind::Task {
+                d = d.push(cap("issue の本文")).push(
+                    text(if r.body.trim().is_empty() {
+                        "(本文なし)".to_string()
+                    } else {
+                        r.body.clone()
+                    })
+                    .size(14)
+                    .color(DIM)
+                    .wrapping(text::Wrapping::WordOrGlyph),
                 );
             }
-        } else if p.mark == "+" {
-            // 取り込みは戻しにくいので、2 回 押して進む
-            one = one.push(if app.confirm == Some(number) {
-                primary(
-                    "Confirm merge",
-                    app.accent,
-                    free.then_some(Msg::Act(asis::act::Action::Merge { repo, number })),
-                )
+            if r.prs.is_empty() {
+                d = d.push(cap("PR はまだありません"));
             } else {
-                primary("Merge", app.accent, Some(Msg::AskMerge(number)))
-            });
+                d = d.push(cap(format!(
+                    "PR {} 本(押すと、その 1 本の中身に移る)",
+                    r.prs.len()
+                )));
+                for p in &r.prs {
+                    let (who, mine) = me(&p.turn);
+                    let one = column![
+                        row![
+                            cap(format!("#{}", p.number)),
+                            chip(p),
+                            Space::new().width(Length::Fill),
+                            text(who)
+                                .size(13)
+                                .color(if mine { app.accent } else { DIM }),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                        text(p.title.clone())
+                            .size(15)
+                            .color(TEXT)
+                            .wrapping(text::Wrapping::WordOrGlyph),
+                    ]
+                    .spacing(6);
+                    d = d.push(pressable(
+                        one.into(),
+                        FRAME,
+                        false,
+                        [11, 14],
+                        Msg::Select(key.clone(), Some(p.number)),
+                    ));
+                }
+            }
+            for l in &r.local {
+                d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
+            }
+            if !r.url.is_empty() {
+                d = d.push(seg(
+                    format!(
+                        "{} を GitHub で開く",
+                        if r.kind == Kind::Task {
+                            format!("issue #{}", r.number)
+                        } else {
+                            label_of(r)
+                        }
+                    ),
+                    false,
+                    Msg::Open(r.url.clone()),
+                ));
+            }
         }
-        d = d.push(
-            container(one)
-                .padding([12, 14])
-                .width(Length::Fill)
-                .style(boxed(frame, Color::TRANSPARENT)),
-        );
-    }
-    if r.kind == Kind::Task {
-        d = d.push(cap("issue の本文"));
-        d = d.push(
-            text(if r.body.trim().is_empty() {
-                "(本文なし)".to_string()
-            } else {
-                r.body.clone()
-            })
-            .size(14)
-            .color(DIM)
-            .wrapping(text::Wrapping::WordOrGlyph),
-        );
-    }
-    for l in &r.local {
-        d = d.push(cap(format!("手元  {}  {}", l.branch, l.panes.join(" / "))));
-    }
-    if !r.url.is_empty() {
-        d = d.push(seg("GitHub で開く".into(), false, Msg::Open(r.url.clone())));
     }
     Some(
         scrollable(container(d).padding(24).width(Length::Fill))
@@ -1285,6 +1555,7 @@ fn view(app: &App) -> Element<'_, Msg> {
         cap("Tab 絞り込み"),
         cap("V ボード / リスト"),
         cap("Enter 中身を出す"),
+        cap("←→ 前後の PR"),
         cap("C 書く"),
         cap("R 読み直す"),
         cap("Esc 閉じる"),
