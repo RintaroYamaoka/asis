@@ -648,6 +648,22 @@ fn pressable<'a>(
     .into()
 }
 
+/// ボードのカードの高さ。全部 同じ大きさにする(PR がまだ無い issue の 1 枚も同じ)
+const CARD_H: f32 = 140.0;
+
+fn card_box<'a>(body: Element<'a, Msg>, line: Color, on: bool, msg: Msg) -> Element<'a, Msg> {
+    mouse_area(
+        container(body)
+            .padding([11, 12])
+            .width(Length::Fill)
+            .height(CARD_H)
+            .clip(true)
+            .style(boxed(line, if on { PANEL } else { Color::TRANSPARENT })),
+    )
+    .on_press(msg)
+    .into()
+}
+
 /// カード = PR 1 本。細く、縦に
 fn pr_card<'a>(
     app: &App,
@@ -702,13 +718,7 @@ fn pr_card<'a>(
         .spacing(8),
     ]
     .spacing(7);
-    pressable(
-        body.into(),
-        line,
-        on,
-        [11, 12],
-        Msg::Select(key, Some(p.number)),
-    )
+    card_box(body.into(), line, on, Msg::Select(key, Some(p.number)))
 }
 
 /// PR がまだ無い issue の、点線の代わりの 1 枚
@@ -728,11 +738,10 @@ fn todo_card<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> {
         ],
     ]
     .spacing(14);
-    pressable(
+    card_box(
         body.into(),
         if mine { app.accent } else { FRAME },
         false,
-        [11, 12],
         Msg::Select(key, None),
     )
 }
