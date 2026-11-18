@@ -551,11 +551,11 @@ pub fn rooms_text(rooms: &[Room]) -> String {
         if room.repos.is_empty() {
             out.push_str("  repo      (まだありません)\n");
         }
-        out.push_str("  メンバー                 確認 取込 本番 管理\n");
+        out.push_str("  メンバー                 Review Merge Deploy Admin\n");
         for m in &room.members {
             let pad = 22usize.saturating_sub(m.login.chars().count());
             out.push_str(&format!(
-                "    {}{}  {}    {}    {}    {}\n",
+                "    {}{}  {}      {}     {}      {}\n",
                 m.login,
                 " ".repeat(pad),
                 yes(m.review),

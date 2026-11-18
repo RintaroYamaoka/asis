@@ -49,7 +49,7 @@ pub struct Source {
 /// プロジェクト名と、その repo ごとの結果
 pub struct Section {
     pub project: String,
-    /// 部屋のメンバーと、その役割(確認・取り込み・本番)。部屋でなければ空
+    /// 部屋のメンバーと、その役割(Review・Merge・Deploy)。部屋でなければ空
     pub people: Vec<(String, String)>,
     pub repos: Vec<Result<RepoView, String>>,
 }
@@ -183,9 +183,9 @@ pub fn people_of(p: &Project) -> Vec<(String, String)> {
         .iter()
         .map(|m| {
             let roles: Vec<&str> = [
-                (&p.review, "確認"),
-                (&p.merge, "取り込み"),
-                (&p.deploy, "本番"),
+                (&p.review, "Review"),
+                (&p.merge, "Merge"),
+                (&p.deploy, "Deploy"),
             ]
             .iter()
             .filter(|(who, _)| who.contains(m))
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(
             people_of(&p),
             vec![
-                ("alice".to_string(), "確認・本番".to_string()),
+                ("alice".to_string(), "Review・Deploy".to_string()),
                 ("bob".to_string(), String::new())
             ]
         );
@@ -559,9 +559,9 @@ mod tests {
         assert!(all.contains("o/r\n"));
         assert_eq!(only_text(&[]), "");
         assert_eq!(only_text(&["a".into(), "b".into()]), "  (a・b の分だけ)");
-        assert!(all.contains("確認待ち  1"));
+        assert!(all.contains("In review  1"));
         assert!(all.contains("#7      login  [あなたの番] 5h  ?#20"));
-        assert!(all.contains("!#21    pr 21  [ann] 5h  チェックが落ちている(lint)"));
+        assert!(all.contains("!#21    pr 21  [ann] 5h  Checks failing (lint)"));
         let mine = plain_text(&sections, Filter::Mine);
         assert!(mine.contains("#7 ") && !mine.contains("#21") && !mine.contains("#8"));
     }

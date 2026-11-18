@@ -459,7 +459,7 @@ mod tests {
         assert!(s.contains("自分の番2"));
         assert!(s.contains("相手の番1"));
         assert!(s.contains("shopo/r"));
-        assert!(s.contains("確認待ち1"));
+        assert!(s.contains("Inreview1"));
         assert!(s.contains("#7login"));
         assert!(s.contains("あなたの番"));
         assert!(s.contains("https://github.com/o/r/issues/7"));

@@ -105,13 +105,13 @@ impl Action {
                     .ok()
                     .and_then(|v| v["number"].as_u64());
                 match number {
-                    Some(n) => format!("{repo} に issue #{n} を書きました"),
-                    None => format!("{repo} に issue を書きました"),
+                    Some(n) => format!("{repo}: issue #{n} opened"),
+                    None => format!("{repo}: issue opened"),
                 }
             }
-            Action::Approve { number, .. } => format!("#{number} を承認しました"),
-            Action::RequestChanges { number, .. } => format!("#{number} に直しを頼みました"),
-            Action::Merge { number, .. } => format!("#{number} を取り込みました"),
+            Action::Approve { number, .. } => format!("#{number}: Approved"),
+            Action::RequestChanges { number, .. } => format!("#{number}: Changes requested"),
+            Action::Merge { number, .. } => format!("#{number}: Merged"),
         }
     }
 }
@@ -129,11 +129,11 @@ fn explain(stderr: &str, stdout: &str) -> String {
         });
     let text = message.unwrap_or_else(|| stderr.trim().to_string());
     if text.contains("approve your own pull request") {
-        "自分の PR は、自分では承認できません".into()
+        "自分の PR は、自分では Approve できません".into()
     } else if text.contains("request changes on your own pull request") {
-        "自分の PR には、直しを頼めません".into()
+        "自分の PR には、Request changes できません".into()
     } else if text.contains("not mergeable") || text.contains("Merge conflict") {
-        "いまは取り込めません(ぶつかっているか、条件を満たしていません)".into()
+        "いまは Merge できません(conflict があるか、条件を満たしていません)".into()
     } else {
         text
     }
@@ -305,18 +305,15 @@ mod tests {
             title: "t".into(),
             body: String::new(),
         };
-        assert_eq!(
-            write.done(r#"{"number": 12}"#),
-            "o/r に issue #12 を書きました"
-        );
-        assert_eq!(write.done("???"), "o/r に issue を書きました");
+        assert_eq!(write.done(r#"{"number": 12}"#), "o/r: issue #12 opened");
+        assert_eq!(write.done("???"), "o/r: issue opened");
         assert_eq!(
             Action::Merge {
                 repo: "o/r".into(),
                 number: 7
             }
             .done(""),
-            "#7 を取り込みました"
+            "#7: Merged"
         );
     }
 
@@ -327,11 +324,11 @@ mod tests {
                 "",
                 r#"{"message":"Unprocessable Entity","errors":["Can not approve your own pull request"]}"#
             ),
-            "自分の PR は、自分では承認できません"
+            "自分の PR は、自分では Approve できません"
         );
         assert!(
             explain("", r#"{"message":"Pull Request is not mergeable"}"#)
-                .contains("取り込めません")
+                .contains("Merge できません")
         );
         assert_eq!(
             explain("gh: Not Found (HTTP 404)\n", ""),

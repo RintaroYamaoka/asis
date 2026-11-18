@@ -164,6 +164,19 @@ PR ごとに、次の表を上から順に当てて最初に当たった行で�
 | TUI | ターミナルの中。AI を動かしているペインの隣 | 開発しながら見る。ターミナルの道具との連携 |
 | GUI | 窓。デスクトップのアイコンから開く | 全体を広く見る。見た目を作り込む |
 
+### 画面に出す言葉
+
+状態・操作・役割の言葉は、GitHub が使っている言葉にそろえる。訳した言葉を新しく作らない(GitHub を使っている人が、覚え直さずに読めるように)。
+
+| 何の言葉か | 画面に出す言葉 |
+|---|---|
+| タスクの状態(ボードの列) | Todo / In progress / In review / Merged(本番に出たのに issue が開いているものは Deployed · issue open) |
+| PR の状態 | Draft / Review required / Changes requested / Checks failing / Checks pending / Merge conflict / Unresolved comment / Approved / Merged / Deployed / Closed |
+| 操作 | Approve / Request changes / Merge(2 回目は Confirm merge) |
+| 役割 | Review / Merge / Deploy |
+
+§5・§6 の表は規則の説明なので日本語で書いてある。画面に出るときは上の言葉になる。
+
 ## 8. AI の入口
 
 タスクは GitHub の issue なので、AI は GitHub の標準の道具で読み書きできる。アプリ専用の接続は作らない。用意するのは、AI に渡す短い手順書 1 枚だけ。置き場は `skill/asis/SKILL.md`。

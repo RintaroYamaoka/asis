@@ -359,7 +359,7 @@ fn open(url: &str) {
 // ---- 何を出すか(描く前の並べ方)----
 
 /// ボードの列。段階を 4 つにまとめる
-const COLUMNS: [&str; 4] = ["やること", "実装中", "確認待ち", "本番待ち"];
+const COLUMNS: [&str; 4] = ["Todo", "In progress", "In review", "Merged"];
 /// リストで束を並べる順(人の手が要る順)
 const LIST_ORDER: [usize; 4] = [2, 3, 1, 0];
 
@@ -466,17 +466,11 @@ fn now_of(row: &Row) -> String {
         .unwrap_or_default()
 }
 
-/// PR の状態を、短い言葉にする
-fn word_of(mark: &str) -> &'static str {
-    match mark {
-        "!" => "直しが要る",
-        "?" => "確認待ち",
-        "+" => "取り込める",
-        "~" => "チェック中",
-        "…" => "下書き",
-        "↑" => "取り込み済み",
-        "✓" => "本番",
-        _ => "取り下げ",
+/// PR の札に出す言葉。GitHub が使っている言葉のまま
+fn word_of(p: &asis::view::PrLine) -> String {
+    match p.mark {
+        "↑" => "Merged".to_string(),
+        _ => p.why.clone(),
     }
 }
 
@@ -567,20 +561,16 @@ fn chips<'a>(row: &Row) -> Element<'a, Msg> {
     for p in row.prs.iter().take(4) {
         let bad = p.mark == "!";
         line = line.push(
-            container(
-                text(word_of(p.mark))
-                    .size(12)
-                    .color(if bad { BAD } else { DIM }),
-            )
-            .padding([1, 7])
-            .style(boxed(
-                if bad {
-                    Color::from_rgb(0.35, 0.18, 0.16)
-                } else {
-                    LINE2
-                },
-                Color::TRANSPARENT,
-            )),
+            container(text(word_of(p)).size(12).color(if bad { BAD } else { DIM }))
+                .padding([1, 7])
+                .style(boxed(
+                    if bad {
+                        Color::from_rgb(0.35, 0.18, 0.16)
+                    } else {
+                        LINE2
+                    },
+                    Color::TRANSPARENT,
+                )),
         );
     }
     line.wrap().into()
@@ -911,7 +901,7 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                 one = one.push(
                     row![
                         field("何を直すかを一言", &app.comment, Msg::Comment, send.clone()),
-                        primary("直しを頼む", app.accent, free.then_some(send)),
+                        primary("Request changes", app.accent, free.then_some(send)),
                     ]
                     .spacing(8)
                     .align_y(Alignment::Center),
@@ -920,7 +910,7 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                 // 1 人の repo では、承認なしで自分の PR を取り込む。その道も出す(2 回 押して進む)
                 let merge = if app.confirm == Some(number) {
                     primary(
-                        "本当に取り込む",
+                        "Confirm merge",
                         app.accent,
                         free.then_some(Msg::Act(asis::act::Action::Merge {
                             repo: repo.clone(),
@@ -928,16 +918,16 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                         })),
                     )
                 } else {
-                    seg("取り込む".into(), false, Msg::AskMerge(number))
+                    seg("Merge".into(), false, Msg::AskMerge(number))
                 };
                 one = one.push(
                     row![
                         primary(
-                            "承認する",
+                            "Approve",
                             app.accent,
                             free.then_some(Msg::Act(asis::act::Action::Approve { repo, number }))
                         ),
-                        seg("直しを頼む…".into(), false, Msg::AskFix(number)),
+                        seg("Request changes…".into(), false, Msg::AskFix(number)),
                         merge,
                     ]
                     .spacing(8),
@@ -947,12 +937,12 @@ fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
             // 取り込みは戻しにくいので、2 回 押して進む
             one = one.push(if app.confirm == Some(number) {
                 primary(
-                    "本当に取り込む",
+                    "Confirm merge",
                     app.accent,
                     free.then_some(Msg::Act(asis::act::Action::Merge { repo, number })),
                 )
             } else {
-                primary("取り込む", app.accent, Some(Msg::AskMerge(number)))
+                primary("Merge", app.accent, Some(Msg::AskMerge(number)))
             });
         }
         d = d.push(

@@ -63,14 +63,14 @@ impl Stage {
 
     pub fn label(self) -> &'static str {
         match self {
-            Stage::NeedsFix => "直しが要る",
-            Stage::InReview => "確認待ち",
-            Stage::ReadyToMerge => "取り込める",
-            Stage::Testing => "チェック中",
-            Stage::AwaitingShip => "本番待ち",
-            Stage::ShippedOpen => "閉じ忘れ",
-            Stage::Doing => "実装中",
-            Stage::Todo => "やること",
+            Stage::NeedsFix => "Needs action",
+            Stage::InReview => "Review required",
+            Stage::ReadyToMerge => "Ready to merge",
+            Stage::Testing => "Checks pending",
+            Stage::AwaitingShip => "Merged",
+            Stage::ShippedOpen => "Deployed",
+            Stage::Doing => "In progress",
+            Stage::Todo => "Todo",
         }
     }
 
@@ -408,14 +408,15 @@ fn local_line(w: &Work) -> LocalLine {
     }
 }
 
+/// 画面に出す言葉は、GitHub が使っている言葉にそろえる(Todo・In progress・In review・Merged …)。
 fn task_label(s: TaskState) -> &'static str {
     match s {
-        TaskState::Todo => "やること",
-        TaskState::Doing => "実装中",
-        TaskState::InReview => "確認待ち",
-        TaskState::AwaitingShip => "本番待ち",
-        TaskState::ShippedOpen => "本番に出た・閉じていない",
-        TaskState::Done => "完了",
+        TaskState::Todo => "Todo",
+        TaskState::Doing => "In progress",
+        TaskState::InReview => "In review",
+        TaskState::AwaitingShip => "Merged",
+        TaskState::ShippedOpen => "Deployed · issue open",
+        TaskState::Done => "Done",
     }
 }
 
@@ -434,17 +435,17 @@ fn mark(s: PrState) -> &'static str {
 
 fn why_pr(r: Reason, failing: &[String]) -> String {
     match r {
-        Reason::Shipped => "本番に出た".into(),
-        Reason::MergedNotShipped => "取り込み済み・まだ本番に出ていない".into(),
-        Reason::Withdrawn => "取り下げ".into(),
-        Reason::Draft => "下書き".into(),
-        Reason::Conflict => "取り込み先とぶつかっている".into(),
-        Reason::ChecksFailing(_) => format!("チェックが落ちている({})", failing.join("・")),
-        Reason::ChangesRequested => "直しを頼まれている".into(),
-        Reason::UnansweredComment => "返していないコメントがある".into(),
-        Reason::ChecksRunning => "チェックが動いている".into(),
-        Reason::Approved => "承認済み・取り込み待ち".into(),
-        Reason::AwaitingReview => "確認待ち".into(),
+        Reason::Shipped => "Deployed".into(),
+        Reason::MergedNotShipped => "Merged · not deployed".into(),
+        Reason::Withdrawn => "Closed".into(),
+        Reason::Draft => "Draft".into(),
+        Reason::Conflict => "Merge conflict".into(),
+        Reason::ChecksFailing(_) => format!("Checks failing ({})", failing.join(", ")),
+        Reason::ChangesRequested => "Changes requested".into(),
+        Reason::UnansweredComment => "Unresolved comment".into(),
+        Reason::ChecksRunning => "Checks pending".into(),
+        Reason::Approved => "Approved".into(),
+        Reason::AwaitingReview => "Review required".into(),
     }
 }
 
@@ -597,7 +598,7 @@ pub(crate) mod tests {
     #[test]
     fn tasks_are_grouped_by_state_and_carry_their_prs() {
         let v = sample();
-        let review = rows(&v, "確認待ち");
+        let review = rows(&v, "In review");
         assert_eq!(review.len(), 1);
         assert_eq!(
             (review[0].label.as_str(), review[0].title.as_str()),
@@ -611,7 +612,7 @@ pub(crate) mod tests {
         assert_eq!(review[0].url, "https://github.com/o/r/issues/7");
         assert_eq!(review[0].age, "5h");
         assert_eq!(
-            rows(&v, "やること")
+            rows(&v, "Todo")
                 .iter()
                 .map(|r| r.label.as_str())
                 .collect::<Vec<_>>(),
@@ -632,7 +633,7 @@ pub(crate) mod tests {
             loose.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(),
             vec!["!#21", "…#23"]
         );
-        assert_eq!(loose[0].why, "チェックが落ちている(lint)");
+        assert_eq!(loose[0].why, "Checks failing (lint)");
         // タスクにも PR にも、同じ段階の言葉が付く
         assert_eq!(
             loose
@@ -644,14 +645,14 @@ pub(crate) mod tests {
                 (Kind::Pr, Stage::Doing, 23)
             ]
         );
-        let review = &rows(&v, "確認待ち")[0];
+        let review = &rows(&v, "In review")[0];
         assert_eq!(
             (review.kind, review.stage, review.number),
             (Kind::Task, Stage::InReview, 7)
         );
-        assert_eq!(rows(&v, "やること")[0].stage, Stage::Todo);
+        assert_eq!(rows(&v, "Todo")[0].stage, Stage::Todo);
         assert!(Stage::ALL.windows(2).all(|w| w[0] < w[1]));
-        assert_eq!(Stage::NeedsFix.label(), "直しが要る");
+        assert_eq!(Stage::NeedsFix.label(), "Needs action");
         assert_eq!(loose[0].url, "https://github.com/o/r/pull/21");
         assert!(v.notes.is_empty());
     }
@@ -813,13 +814,13 @@ pub(crate) mod tests {
         assert_eq!(row("!#21").local_mark(), "◆");
         // 手元にブランチがあるだけで、タスクは実装中になる(push する前から見える)
         assert_eq!(
-            rows(&v, "実装中")
+            rows(&v, "In progress")
                 .iter()
                 .map(|r| (r.label.as_str(), r.local_mark()))
                 .collect::<Vec<_>>(),
             vec![("#8", "◇")]
         );
-        assert!(rows(&v, "やること").is_empty());
+        assert!(rows(&v, "Todo").is_empty());
         // 既定のブランチの worktree は出さない
         assert!(rows(&v, LOCAL).is_empty());
         assert_eq!(row("…#23").local_mark(), "");
