@@ -9,3 +9,13 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# 重さを調べるとき用(`cargo build --profile profiling`)。速さは release と同じで、関数の名前を残す
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = 1
+
+# CPU で描く部品(iced の tiny-skia)を、直したものに差し替える。何を直したかは vendor/iced_tiny_skia/PATCHES.md
+[patch.crates-io]
+iced_tiny_skia = { path = "vendor/iced_tiny_skia" }

@@ -18,10 +18,20 @@ pub struct Surface {
         Box<dyn compositor::Display>,
         Box<dyn compositor::Window>,
     >,
-    clip_mask: tiny_skia::Mask,
-    layer_stack: VecDeque<Vec<Layer>>,
+    clip_mask: crate::engine::ClipMask,
+    /// The picture of the window, kept in our own memory.
+    ///
+    /// Everything is drawn here first and then copied to the buffer of the
+    /// window. The buffer of the window may be shared with the display
+    /// server; blending in it directly reads that memory back for every
+    /// pixel, and what it holds depends on how old the buffer is.
+    frame: tiny_skia::Pixmap,
+    /// What `frame` shows.
+    layers: Option<Vec<Layer>>,
+    /// The regions redrawn in the last presents, newest first. A buffer of
+    /// the window that is `age` presents old misses the first `age` of them.
+    damage_history: VecDeque<Vec<Rectangle>>,
     background_color: Color,
-    max_age: u8,
 }
 
 impl crate::graphics::Compositor for Compositor {
@@ -69,10 +79,12 @@ impl crate::graphics::Compositor for Compositor {
 
         let mut surface = Surface {
             window,
-            clip_mask: tiny_skia::Mask::new(1, 1).expect("Create clip mask"),
-            layer_stack: VecDeque::new(),
+            clip_mask: crate::engine::ClipMask::new(1, 1)
+                .expect("Create clip mask"),
+            frame: tiny_skia::Pixmap::new(1, 1).expect("Create frame"),
+            layers: None,
+            damage_history: VecDeque::new(),
             background_color: Color::BLACK,
-            max_age: 0,
         };
 
         if width > 0 && height > 0 {
@@ -96,9 +108,12 @@ impl crate::graphics::Compositor for Compositor {
             )
             .expect("Resize surface");
 
-        surface.clip_mask =
-            tiny_skia::Mask::new(width, height).expect("Create clip mask");
-        surface.layer_stack.clear();
+        surface.clip_mask = crate::engine::ClipMask::new(width, height)
+            .expect("Create clip mask");
+        surface.frame =
+            tiny_skia::Pixmap::new(width, height).expect("Create frame");
+        surface.layers = None;
+        surface.damage_history.clear();
     }
 
     fn information(&self) -> Information {
@@ -153,61 +168,30 @@ pub fn present(
     background_color: Color,
     on_pre_present: impl FnOnce(),
 ) -> Result<(), compositor::SurfaceError> {
-    let physical_size = viewport.physical_size();
+    let window = Rectangle::with_size(viewport.logical_size());
 
-    let mut buffer = surface
-        .window
-        .buffer_mut()
-        .map_err(|_| compositor::SurfaceError::Lost)?;
-
-    let last_layers = {
-        let age = buffer.age();
-
-        surface.max_age = surface.max_age.max(age);
-        surface.layer_stack.truncate(surface.max_age as usize);
-
-        if age > 0 {
-            surface.layer_stack.get(age as usize - 1)
-        } else {
-            None
-        }
-    };
-
-    let damage = last_layers
-        .and_then(|last_layers| {
-            (surface.background_color == background_color).then(|| {
+    // What changed since the last time we drew.
+    let damage = match &surface.layers {
+        Some(last_layers) if surface.background_color == background_color => {
+            damage::group(
                 damage::diff(
                     last_layers,
                     renderer.layers(),
                     |layer| vec![layer.bounds],
                     Layer::damage,
-                )
-            })
-        })
-        .unwrap_or_else(|| vec![Rectangle::with_size(viewport.logical_size())]);
-
-    if damage.is_empty() {
-        if let Some(last_layers) = last_layers {
-            surface.layer_stack.push_front(last_layers.clone());
+                ),
+                window,
+            )
         }
-    } else {
-        surface.layer_stack.push_front(renderer.layers().to_vec());
+        _ => vec![window],
+    };
+
+    if !damage.is_empty() {
+        surface.layers = Some(renderer.layers().to_vec());
         surface.background_color = background_color;
 
-        let damage = damage::group(
-            damage,
-            Rectangle::with_size(viewport.logical_size()),
-        );
-
-        let mut pixels = tiny_skia::PixmapMut::from_bytes(
-            bytemuck::cast_slice_mut(&mut buffer),
-            physical_size.width,
-            physical_size.height,
-        )
-        .expect("Create pixel map");
-
         renderer.draw(
-            &mut pixels,
+            &mut surface.frame.as_mut(),
             &mut surface.clip_mask,
             viewport,
             &damage,
@@ -215,8 +199,94 @@ pub fn present(
         );
     }
 
+    let mut buffer = surface
+        .window
+        .buffer_mut()
+        .map_err(|_| compositor::SurfaceError::Lost)?;
+
+    surface.damage_history.push_front(damage);
+    surface.damage_history.truncate(MAX_BUFFER_AGE);
+
+    // The buffer misses what was drawn while it was away. Without a known
+    // age, or with one older than we remember, it gets the whole frame.
+    let age = buffer.age() as usize;
+    let whole = [window];
+    let missed: Vec<Rectangle> =
+        if age == 0 || age > surface.damage_history.len() {
+            whole.to_vec()
+        } else {
+            surface
+                .damage_history
+                .iter()
+                .take(age)
+                .flatten()
+                .copied()
+                .collect()
+        };
+
+    let copied = copy_regions(
+        &surface.frame,
+        bytemuck::cast_slice_mut(&mut buffer),
+        &missed,
+        viewport.scale_factor(),
+    );
+
     on_pre_present();
-    buffer.present().map_err(|_| compositor::SurfaceError::Lost)
+
+    if copied.is_empty() {
+        buffer.present()
+    } else {
+        buffer.present_with_damage(&copied)
+    }
+    .map_err(|_| compositor::SurfaceError::Lost)
+}
+
+/// How many presents of damage are remembered. Display servers hand out two
+/// or three buffers in turn.
+const MAX_BUFFER_AGE: usize = 4;
+
+/// Copies the given regions of `frame` to `buffer`, which has the same size
+/// and pixel layout, and returns the pixels that were copied.
+fn copy_regions(
+    frame: &tiny_skia::Pixmap,
+    buffer: &mut [u8],
+    regions: &[Rectangle],
+    scale_factor: f32,
+) -> Vec<softbuffer::Rect> {
+    let width = frame.width() as usize;
+    let height = frame.height() as usize;
+    let source = frame.data();
+
+    if buffer.len() != source.len() {
+        return Vec::new();
+    }
+
+    regions
+        .iter()
+        .filter_map(|region| {
+            let region = *region * scale_factor;
+            let left = (region.x.floor().max(0.0) as usize).min(width);
+            let top = (region.y.floor().max(0.0) as usize).min(height);
+            let right =
+                ((region.x + region.width).ceil().max(0.0) as usize).min(width);
+            let bottom = ((region.y + region.height).ceil().max(0.0) as usize)
+                .min(height);
+
+            for y in top..bottom {
+                let row = y * width * 4;
+
+                buffer[row + left * 4..row + right * 4]
+                    .copy_from_slice(&source[row + left * 4..row + right * 4]);
+            }
+
+            Some(softbuffer::Rect {
+                x: left as u32,
+                y: top as u32,
+                width: NonZeroU32::new((right - left) as u32)?,
+                height: NonZeroU32::new((bottom - top) as u32)?,
+            })
+        })
+        .collect()
 }
 
 pub fn screenshot(
@@ -229,7 +299,7 @@ pub fn screenshot(
     let mut offscreen_buffer: Vec<u32> =
         vec![0; size.width as usize * size.height as usize];
 
-    let mut clip_mask = tiny_skia::Mask::new(size.width, size.height)
+    let mut clip_mask = crate::engine::ClipMask::new(size.width, size.height)
         .expect("Create clip mask");
 
     renderer.draw(
