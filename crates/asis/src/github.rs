@@ -97,6 +97,49 @@ pub fn fetch(repo: &str, ignore_checks: &[String]) -> Result<RepoFacts, String> 
     parse(&v, ignore_checks).ok_or_else(missing)
 }
 
+/// gh が使えるかどうか
+#[derive(Debug, Clone, PartialEq)]
+pub enum Gh {
+    /// 使える。GitHub のアカウント名
+    Ready(String),
+    /// gh が入っていない
+    Missing,
+    /// 入っているが、ログインしていない
+    SignedOut,
+    /// それ以外で聞けなかった(理由)
+    Failed(String),
+}
+
+/// gh の返事から、どの状態かを決める
+pub fn gh_state(ran: Result<(bool, String, String), std::io::ErrorKind>) -> Gh {
+    match ran {
+        Err(std::io::ErrorKind::NotFound) => Gh::Missing,
+        Err(e) => Gh::Failed(format!("gh を動かせません: {e}")),
+        Ok((true, out, _)) if !out.trim().is_empty() => Gh::Ready(out.trim().to_string()),
+        Ok((_, _, err)) if err.contains("auth login") || err.contains("not logged") => {
+            Gh::SignedOut
+        }
+        Ok((_, _, err)) => Gh::Failed(err.trim().to_string()),
+    }
+}
+
+/// gh が使えるか、誰としてログインしているかを聞く(GitHub に 1 回 聞く)
+pub fn whoami() -> Gh {
+    gh_state(
+        Command::new("gh")
+            .args(["api", "user", "--jq", ".login"])
+            .output()
+            .map(|o| {
+                (
+                    o.status.success(),
+                    String::from_utf8_lossy(&o.stdout).into_owned(),
+                    String::from_utf8_lossy(&o.stderr).into_owned(),
+                )
+            })
+            .map_err(|e| e.kind()),
+    )
+}
+
 fn ask(query: &str, owner: &str, name: &str) -> Result<Value, String> {
     let out = Command::new("gh")
         .args(["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}")])
@@ -375,6 +418,32 @@ fn unanswered(p: &Value, author: &str, last_push: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_state_tells_missing_signed_out_and_ready() {
+        use std::io::ErrorKind;
+        assert_eq!(gh_state(Err(ErrorKind::NotFound)), Gh::Missing);
+        assert_eq!(
+            gh_state(Ok((true, "alice\n".into(), String::new()))),
+            Gh::Ready("alice".into())
+        );
+        assert_eq!(
+            gh_state(Ok((
+                false,
+                String::new(),
+                "To get started with GitHub CLI, please run:  gh auth login".into()
+            ))),
+            Gh::SignedOut
+        );
+        assert!(matches!(
+            gh_state(Ok((
+                false,
+                String::new(),
+                "error connecting to api.github.com".into()
+            ))),
+            Gh::Failed(_)
+        ));
+    }
     use serde_json::json;
 
     fn pr(extra: Value) -> Value {

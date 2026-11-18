@@ -18,6 +18,8 @@ pub struct Project {
     pub deploy: Vec<String>,
     /// 状態を決めるときに数えないチェックの名前
     pub ignore_checks: Vec<String>,
+    /// 部屋から来た定義なら、その部屋の番号
+    pub room: Option<String>,
 }
 
 /// 手元の設定
@@ -119,6 +121,7 @@ fn project(raw: RawProject, home: Option<&str>) -> Result<Project, String> {
         merge: raw.roles.merge,
         deploy: raw.roles.deploy,
         ignore_checks: raw.ignore_checks,
+        room: None,
     })
 }
 
@@ -283,23 +286,89 @@ pub fn with_only(text: &str, repo: &str, people: &[String]) -> String {
     out
 }
 
-/// 見る repo を足す・外す。足すときは、その repo で誰の分を出すか(空なら全部)も書く。結果を返す。
-pub fn edit_watch(repo: &str, add: bool, only: &[String]) -> Result<Local, String> {
-    check_repo(repo)?;
-    let path = path().ok_or("設定ファイルの置き場が分かりません(HOME がありません)")?;
-    let text = read(&path)?;
-    let mut watch = parse_local(&text)
-        .map_err(|e| format!("{}: {e}", path.display()))?
-        .watch;
-    watch.retain(|r| r != repo);
-    if add {
-        watch.push(repo.to_string());
+fn is_header(line: &str) -> bool {
+    line.trim_start().starts_with('[')
+}
+
+fn is_key(line: &str, key: &str) -> bool {
+    line.trim_start()
+        .strip_prefix(key)
+        .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// 一番上の段(表の見出しより前)の `key = "value"` を書き換えた中身を返す。`None` なら行を消す。
+/// ほかの行(表やコメント)は触らない。値は呼ぶ側で確かめておく。
+pub fn with_value(text: &str, key: &str, value: Option<&str>) -> String {
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let top = lines
+        .iter()
+        .position(|l| is_header(l))
+        .unwrap_or(lines.len());
+    let keep: Vec<String> = lines[..top]
+        .iter()
+        .filter(|l| !is_key(l, key))
+        .cloned()
+        .collect();
+    let rest = lines.split_off(top);
+    let mut out = keep;
+    if let Some(v) = value {
+        // 一番上の段の、最後の中身のある行のすぐ後に置く
+        let at = out
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map_or(0, |i| i + 1);
+        out.insert(at, format!("{key} = \"{v}\""));
     }
-    let next = with_only(
-        &with_watch(&text, &watch)?,
-        repo,
-        if add { only } else { &[] },
+    if !rest.is_empty() && out.last().is_some_and(|l| !l.trim().is_empty()) {
+        out.push(String::new());
+    }
+    out.extend(rest);
+    let body = out.join("\n");
+    let body = body.trim_matches('\n');
+    if body.is_empty() {
+        String::new()
+    } else {
+        format!("{body}\n")
+    }
+}
+
+/// `[db]` の表だけを書き換えた中身を返す。
+pub fn with_db(text: &str, db: &Db) -> Result<String, String> {
+    if !db.url.starts_with("https://") {
+        return Err("DB の URL は https:// で始めてください".into());
+    }
+    let plain = |s: &str| !s.is_empty() && !s.contains(['"', '\\', '\n']);
+    if !plain(&db.url) || !plain(&db.key) {
+        return Err("DB の URL と鍵を、空にせず、記号の \" \\ を入れずに書いてください".into());
+    }
+    let mut out: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in text.lines() {
+        if is_header(line) {
+            inside = line.trim() == "[db]";
+        }
+        if !inside {
+            out.push(line);
+        }
+    }
+    let body = out.join("\n");
+    let body = body.trim_end();
+    let table = format!(
+        "[db]\nurl = \"{}\"\nkey = \"{}\"\n",
+        db.url.trim_end_matches('/'),
+        db.key
     );
+    Ok(if body.is_empty() {
+        table
+    } else {
+        format!("{body}\n\n{table}")
+    })
+}
+
+/// 設定ファイルの中身を、読めることを確かめてから書く。
+pub fn save(change: impl FnOnce(&str) -> Result<String, String>) -> Result<Local, String> {
+    let path = path().ok_or("設定ファイルの置き場が分かりません(HOME がありません)")?;
+    let next = change(&read(&path)?)?;
     let local = parse_local(&next).map_err(|e| {
         format!("書き換えた設定を読めません({e})。設定ファイルを手で直してください")
     })?;
@@ -308,6 +377,23 @@ pub fn edit_watch(repo: &str, add: bool, only: &[String]) -> Result<Local, Strin
     }
     std::fs::write(&path, next).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(local)
+}
+
+/// 見る repo を足す・外す。足すときは、その repo で誰の分を出すか(空なら全部)も書く。結果を返す。
+pub fn edit_watch(repo: &str, add: bool, only: &[String]) -> Result<Local, String> {
+    check_repo(repo)?;
+    save(|text| {
+        let mut watch = parse_local(text)?.watch;
+        watch.retain(|r| r != repo);
+        if add {
+            watch.push(repo.to_string());
+        }
+        Ok(with_only(
+            &with_watch(text, &watch)?,
+            repo,
+            if add { only } else { &[] },
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -426,6 +512,62 @@ deploy = ["me"]
             "[[project]]\nname = \"x\"\nrepos = [\"o/r\"]\n[project.roles]\nboss = [\"x\"]"
         )
         .is_err());
+    }
+
+    #[test]
+    fn with_value_rewrites_a_top_line_and_keeps_tables() {
+        let text = "watch = [\"o/a\"]\naccent = \"#000000\"\n\n[db]\nurl = \"https://x.example\"\nkey = \"k\"\n";
+        let next = with_value(text, "accent", Some("#58e0bd"));
+        let l = parse_local(&next).unwrap();
+        assert_eq!(l.accent.as_deref(), Some("#58e0bd"));
+        assert_eq!(l.db.unwrap().key, "k");
+        assert_eq!(l.watch, vec!["o/a"]);
+        // 無ければ、表より前に足す(表の中の同じ名前の行は触らない)
+        let next = with_value(&next, "lang", Some("en"));
+        assert!(
+            next.find("lang").unwrap() < next.find("[db]").unwrap(),
+            "{next}"
+        );
+        assert_eq!(parse_local(&next).unwrap().lang.as_deref(), Some("en"));
+        let next = with_value(&next, "key", Some("x"));
+        assert!(parse_local(&next).is_err());
+        // 空の設定にも書ける・消せる
+        assert_eq!(with_value("", "lang", Some("ja")), "lang = \"ja\"\n");
+        let gone = with_value(text, "accent", None);
+        assert_eq!(parse_local(&gone).unwrap().accent, None);
+        assert!(gone.contains("[db]"));
+    }
+
+    #[test]
+    fn with_db_replaces_only_the_db_table() {
+        let text = "lang = \"en\"\n\n[db]\nurl = \"https://old.example\"\nkey = \"old\"\n\n[only]\n\"o/a\" = [\"bob\"]\n";
+        let db = Db {
+            url: "https://new.example".into(),
+            key: "new".into(),
+        };
+        let next = with_db(text, &db).unwrap();
+        let l = parse_local(&next).unwrap();
+        assert_eq!(l.db, Some(db.clone()));
+        assert_eq!(l.lang.as_deref(), Some("en"));
+        assert_eq!(l.only.len(), 1);
+        assert_eq!(next.matches("[db]").count(), 1, "{next}");
+        assert_eq!(
+            parse_local(&with_db("", &db).unwrap()).unwrap().db,
+            Some(db)
+        );
+        let bad = |url: &str, key: &str| {
+            with_db(
+                "",
+                &Db {
+                    url: url.into(),
+                    key: key.into(),
+                },
+            )
+            .is_err()
+        };
+        assert!(bad("http://x.example", "k"));
+        assert!(bad("https://x.example", ""));
+        assert!(bad("https://x.example", "a\"b"));
     }
 
     #[test]

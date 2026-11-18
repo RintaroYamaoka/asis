@@ -164,6 +164,15 @@ PR ごとに、次の表を上から順に当てて最初に当たった行で�
 | TUI | ターミナルの中。AI を動かしているペインの隣 | 開発しながら見る。ターミナルの道具との連携 |
 | GUI | 窓。デスクトップのアイコンから開く | 全体を広く見る。見た目を作り込む |
 
+### ボードのまわりの画面
+
+ボードとリストのほかに、前に出す画面が 3 つと、ボードの代わりに出す画面がある。どれも部屋の定義と手元の設定を変えるだけで、状態には触らない。
+
+- **Settings**(左端の下):Appearance(1 色・説明の文の言葉)/ Account(gh の名前・部屋の Sign in と Sign out)/ Database(部屋を置く DB。替えると Sign in をやり直す)。
+- **Room settings**(2 列目の下。部屋を開いているときだけ):Members(Review・Merge・Deploy・Admin の切り替え、Invite、Remove)/ Repositories(足す・外す、Everyone と Members only、Ignored checks)/ Room(Leave・Delete。Delete は 2 回押す)。変えられるのは Admin だけ。Admin でない人には、その旨を出して押せなくする。Admin が 1 人もいなくなる変更は、送る前に止める。
+- **New room**(左端の +):名前だけで作る。作ったら、その部屋の Repositories を開く。repo がまだ無い部屋も、左端に出す。
+- **ボードの代わりに出す画面**:gh が無い・ログインしていない → 直し方の 2 手と「Check again」。部屋も repo も無い → はじめの画面(Sign in → New room の 1 本道)。読み込み中 → Loading。絞り込んで何も無い → 何も無いことと、ほかの人の番の件数と、All に戻すボタン。
+
 ### 画面に出す言葉
 
 状態・操作・役割の言葉は、GitHub が使っている言葉にそろえる。訳した言葉を新しく作らない(GitHub を使っている人が、覚え直さずに読めるように)。

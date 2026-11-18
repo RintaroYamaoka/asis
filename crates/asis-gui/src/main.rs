@@ -4,14 +4,19 @@
 //! 骨組み:左端に部屋の列 → repo とメンバー → 真ん中(ボードかリスト)→ 右に詳細。
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod panels;
+
+use asis::github::Gh;
+use asis::room::{Role, Room};
 use asis::view::{Filter, Kind, RepoView, Row, Stage};
-use asis::{Loader, Section};
+use asis::{Loader, Rooms, Section};
 use iced::keyboard::{self, key::Named, Key as KeyCode};
 use iced::widget::{
     button, column, container, mouse_area, opaque, responsive, row, scrollable, stack, text,
     text_input, Space,
 };
 use iced::{Alignment, Border, Color, Element, Font, Length, Subscription, Task, Theme};
+use panels::{Pop, RoomTab, SetTab};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -25,6 +30,51 @@ type Key = (String, Kind, u64, String);
 enum Look {
     Board,
     List,
+}
+
+/// 設定の画面で打っている途中の字
+#[derive(Default)]
+struct Form {
+    room_name: String,
+    invite: String,
+    repo: String,
+    check: String,
+    color: String,
+    db_url: String,
+    db_key: String,
+}
+
+#[derive(Clone, Copy)]
+enum Field {
+    RoomName,
+    Invite,
+    Repo,
+    Check,
+    Color,
+    DbUrl,
+    DbKey,
+}
+
+/// 部屋を変える操作。DB に送る
+#[derive(Clone)]
+enum Op {
+    Create(String),
+    AddRepo(String, String),
+    Everyone(String, String, bool),
+    DropRepo(String, String),
+    Invite(String, String),
+    Role(String, i64, Role, bool),
+    Kick(String, i64),
+    Leave(String),
+    Checks(String, Vec<String>),
+    Delete(String),
+}
+
+/// 読み込んだもの。部屋の画面と、部屋の一覧
+#[derive(Clone)]
+struct Snapshot {
+    sections: Arc<Vec<Section>>,
+    rooms: Rooms,
 }
 
 #[derive(Default)]
@@ -64,6 +114,21 @@ struct App {
     accent: Color,
     /// 説明の文を英語で出すか(大事な単語は、どちらでも英語)
     english: bool,
+    /// gh が使えるか。None は確かめている途中
+    gh: Option<Gh>,
+    /// 入っている部屋(DB から読んだもの)
+    rooms: Rooms,
+    /// 前に出している設定の画面
+    pop: Option<Pop>,
+    form: Form,
+    /// 作ったばかりの部屋。読み込みに出てきたら、そこを開く
+    want_room: Option<String>,
+    /// 部屋を消すのを 1 回 押した
+    confirm_delete: bool,
+    /// ブラウザでのログインを待っている
+    signing_in: bool,
+    /// 部屋を置く DB の場所(設定)
+    db_url: Option<String>,
 }
 
 impl App {
@@ -79,7 +144,20 @@ impl App {
 
 #[derive(Clone)]
 enum Msg {
-    Loaded(Result<Arc<Vec<Section>>, String>),
+    Loaded(Result<Snapshot, String>),
+    GhChecked(Gh),
+    CheckGh,
+    Pop(Option<Pop>),
+    Input(Field, String),
+    RoomOp(Op),
+    RoomDone(Result<String, String>),
+    SignIn,
+    SignedIn(Result<(), String>),
+    SignOut,
+    Accent(String),
+    Lang(bool),
+    SaveDb,
+    AskDelete,
     Room(Option<usize>),
     Repo(Option<String>),
     Filter(Filter),
@@ -113,37 +191,66 @@ fn load(loader: Arc<Mutex<Option<Loader>>>, force: bool) -> Task<Msg> {
             let mut guard = loader
                 .lock()
                 .map_err(|_| "読み込みが途中で止まりました".to_string())?;
-            if guard.is_none() {
-                // `asis-gui owner/repo` と打てば、その repo だけを既定の決まりで開く
-                let repos: Vec<String> = std::env::args().skip(1).collect();
-                let source = if repos.is_empty() {
-                    asis::default_source(&[])?
-                } else {
-                    asis::Source {
+            // `asis-gui owner/repo` と打てば、その repo だけを既定の決まりで開く
+            let repos: Vec<String> = std::env::args().skip(1).collect();
+            let rooms = if repos.is_empty() {
+                // 部屋は毎回 読み直す(招かれた部屋・変えた役割が、開いたまま入るように)
+                let local = asis::config::load()?;
+                let rooms = asis::read_rooms(&local);
+                // 部屋を読めなかったときは、前に読んだ部屋のまま見る(画面から消さない)
+                if !(matches!(rooms, Rooms::Failed(_)) && guard.is_some()) {
+                    let list = match &rooms {
+                        Rooms::Read(r) => r.as_slice(),
+                        _ => &[],
+                    };
+                    let source = asis::source_of(local.clone(), list, &[]);
+                    match guard.as_mut() {
+                        Some(l) => l.set_source(source),
+                        None => *guard = Some(Loader::new(source)),
+                    }
+                }
+                rooms
+            } else {
+                if guard.is_none() {
+                    *guard = Some(Loader::new(asis::Source {
                         watch: repos,
                         only: Default::default(),
                         roots: vec![],
                         local: vec![],
-                    }
-                };
-                *guard = Some(Loader::new(source));
-            }
-            Ok(Arc::new(guard.as_mut().expect("入れたばかり").load(force)))
+                    }));
+                }
+                Rooms::NoDb
+            };
+            let sections = Arc::new(guard.as_mut().expect("入れたばかり").load(force));
+            Ok(Snapshot { sections, rooms })
         },
         Msg::Loaded,
     )
 }
 
+fn check_gh() -> Task<Msg> {
+    Task::perform(async { asis::github::whoami() }, Msg::GhChecked)
+}
+
+/// 部屋の 1 つ 1 つを指す名前(部屋なら番号、手元の定義なら名前)。読み直しても同じ部屋を開いたままにする
+fn section_key(s: &Section) -> String {
+    s.room.clone().unwrap_or_else(|| s.project.clone())
+}
+
+fn color_of(hex: &str) -> Option<Color> {
+    asis::config::parse_color(hex).map(|[r, g, b]| Color::from_rgb8(r, g, b))
+}
+
 fn boot() -> (App, Task<Msg>) {
     let loader = Arc::new(Mutex::new(None));
+    let local = asis::config::load().unwrap_or_default();
     // 1 色は、手元の設定で選べる。書いていなければ既定の色
-    let accent = asis::config::load()
-        .ok()
-        .and_then(|l| l.accent)
-        .and_then(|c| asis::config::parse_color(&c))
-        .map(|[r, g, b]| Color::from_rgb8(r, g, b))
+    let accent = local
+        .accent
+        .as_deref()
+        .and_then(color_of)
         .unwrap_or(Color::from_rgb8(0xf2, 0xb6, 0x3c));
-    let english = asis::config::load().ok().and_then(|l| l.lang).as_deref() == Some("en");
+    let english = local.lang.as_deref() == Some("en");
     let app = App {
         loader: loader.clone(),
         sections: Arc::new(Vec::new()),
@@ -165,8 +272,16 @@ fn boot() -> (App, Task<Msg>) {
         error: None,
         accent,
         english,
+        gh: None,
+        rooms: Rooms::NoDb,
+        pop: None,
+        form: Form::default(),
+        want_room: None,
+        confirm_delete: false,
+        signing_in: false,
+        db_url: local.db.map(|d| d.url),
     };
-    (app, load(loader, true))
+    (app, Task::batch([check_gh(), load(loader, true)]))
 }
 
 fn update(app: &mut App, msg: Msg) -> Task<Msg> {
@@ -174,28 +289,216 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Loaded(result) => {
             app.loading = false;
             match result {
-                Ok(sections) => {
+                Ok(Snapshot { sections, rooms }) => {
+                    // 開いていた部屋を、読み直したあとも開いたままにする(並びが変わっても)
+                    let was = app.room.and_then(|i| app.sections.get(i)).map(section_key);
+                    app.room = was.and_then(|k| sections.iter().position(|s| section_key(s) == k));
+                    // 作ったばかりの部屋が出てきたら、そこを開く
+                    if let Some(id) = &app.want_room {
+                        if let Some(i) = sections.iter().position(|s| s.room.as_ref() == Some(id)) {
+                            app.room = Some(i);
+                            app.repo = None;
+                            app.want_room = None;
+                        }
+                    }
                     // 最初に開いたとき、部屋が 1 つならそれを開く
                     if app.synced.is_none() && sections.len() == 1 {
                         app.room = Some(0);
                     }
                     app.sections = sections;
+                    app.rooms = rooms;
                     // 作るとき用:最初の 1 件の中身を出した状態で開く(画面を撮って確かめるため)
                     #[cfg(debug_assertions)]
                     if app.synced.is_none() && std::env::var_os("ASIS_OPEN_FIRST").is_some() {
                         step(app, 1);
                         app.open = app.selected.is_some();
                     }
+                    // 作るとき用:設定の画面を出した状態で開く(`ASIS_POP=look|account|db|members|repos|room|new`)
+                    #[cfg(debug_assertions)]
+                    if app.synced.is_none() {
+                        app.pop = match std::env::var("ASIS_POP").as_deref() {
+                            Ok("look") => Some(Pop::Settings(SetTab::Look)),
+                            Ok("account") => Some(Pop::Settings(SetTab::Account)),
+                            Ok("db") => Some(Pop::Settings(SetTab::Db)),
+                            Ok("members") => Some(Pop::Room(RoomTab::Members)),
+                            Ok("repos") => Some(Pop::Room(RoomTab::Repos)),
+                            Ok("room") => Some(Pop::Room(RoomTab::Room)),
+                            Ok("new") => Some(Pop::NewRoom),
+                            _ => None,
+                        };
+                    }
                     app.synced = Some(Instant::now());
                     app.error = None;
-                    if app.room.is_some_and(|i| i >= app.sections.len()) {
-                        app.room = None;
+                    // 開いていた部屋が無くなったら、部屋の設定も閉じる
+                    if app.room.is_none()
+                        && app.want_room.is_none()
+                        && matches!(app.pop, Some(Pop::Room(_)))
+                    {
+                        app.pop = None;
                     }
                 }
                 Err(e) => app.error = Some(e),
             }
             return Task::perform(async { std::thread::sleep(EVERY) }, |_| Msg::Again);
         }
+        Msg::GhChecked(gh) => app.gh = Some(gh),
+        Msg::CheckGh => {
+            app.gh = None;
+            return Task::batch([check_gh(), update(app, Msg::Refresh)]);
+        }
+        Msg::Pop(pop) => {
+            app.pop = pop;
+            app.notice = None;
+            app.confirm_delete = false;
+            app.open = false;
+            app.write = None;
+        }
+        Msg::Input(field, value) => {
+            let f = &mut app.form;
+            *match field {
+                Field::RoomName => &mut f.room_name,
+                Field::Invite => &mut f.invite,
+                Field::Repo => &mut f.repo,
+                Field::Check => &mut f.check,
+                Field::Color => &mut f.color,
+                Field::DbUrl => &mut f.db_url,
+                Field::DbKey => &mut f.db_key,
+            } = value;
+        }
+        Msg::RoomOp(op) => {
+            if app.busy {
+                return Task::none();
+            }
+            if let Some(e) = panels::refuse(app, &op) {
+                app.notice = Some((e, false));
+                return Task::none();
+            }
+            app.busy = true;
+            app.notice = None;
+            return Task::perform(async move { run_op(op) }, Msg::RoomDone);
+        }
+        Msg::RoomDone(result) => {
+            app.busy = false;
+            app.confirm_delete = false;
+            match result {
+                Ok(done) => {
+                    if let Some(id) = done.strip_prefix("created:") {
+                        app.want_room = Some(id.to_string());
+                        app.pop = Some(Pop::Room(RoomTab::Repos));
+                        app.notice = Some((
+                            app.t(
+                                "Room を作りました。repository を足してください",
+                                "Room created. Add repositories next",
+                            )
+                            .into(),
+                            true,
+                        ));
+                    } else if done == "gone" {
+                        app.pop = None;
+                        app.room = None;
+                        app.notice = None;
+                    } else {
+                        app.notice = (!done.is_empty()).then_some((done, true));
+                    }
+                    app.form = Form::default();
+                    if !app.loading {
+                        app.loading = true;
+                        return load(app.loader.clone(), false);
+                    }
+                }
+                Err(e) => app.notice = Some((e, false)),
+            }
+        }
+        Msg::SignIn => {
+            let Some(db) = asis::config::load().ok().and_then(|l| l.db) else {
+                app.pop = Some(Pop::Settings(SetTab::Db));
+                return Task::none();
+            };
+            if app.signing_in {
+                return Task::none();
+            }
+            app.signing_in = true;
+            app.notice = None;
+            return Task::perform(
+                async move { asis::room::sign_in(&db, &|_| {}) },
+                Msg::SignedIn,
+            );
+        }
+        Msg::SignedIn(result) => {
+            app.signing_in = false;
+            match result {
+                Ok(()) => {
+                    app.notice = Some((app.t("Sign in しました", "Signed in").into(), true));
+                    return update(app, Msg::Refresh);
+                }
+                Err(e) => app.notice = Some((e, false)),
+            }
+        }
+        Msg::SignOut => match asis::room::sign_out() {
+            Ok(_) => {
+                app.room = None;
+                app.notice = Some((app.t("Sign out しました", "Signed out").into(), true));
+                return update(app, Msg::Refresh);
+            }
+            Err(e) => app.notice = Some((e, false)),
+        },
+        Msg::Accent(hex) => {
+            let hex = hex.trim().to_lowercase();
+            match color_of(&hex) {
+                None => {
+                    app.notice = Some((
+                        app.t("#rrggbb の形で入れてください", "Use the form #rrggbb")
+                            .into(),
+                        false,
+                    ))
+                }
+                Some(color) => match asis::config::save(|t| {
+                    Ok(asis::config::with_value(t, "accent", Some(&hex)))
+                }) {
+                    Ok(_) => {
+                        app.accent = color;
+                        app.form.color.clear();
+                        app.notice = None;
+                    }
+                    Err(e) => app.notice = Some((e, false)),
+                },
+            }
+        }
+        Msg::Lang(english) => {
+            let lang = if english { "en" } else { "ja" };
+            match asis::config::save(|t| Ok(asis::config::with_value(t, "lang", Some(lang)))) {
+                Ok(_) => {
+                    app.english = english;
+                    app.notice = None;
+                }
+                Err(e) => app.notice = Some((e, false)),
+            }
+        }
+        Msg::SaveDb => {
+            let db = asis::config::Db {
+                url: app.form.db_url.trim().trim_end_matches('/').to_string(),
+                key: app.form.db_key.trim().to_string(),
+            };
+            match asis::config::save(|t| asis::config::with_db(t, &db)) {
+                Ok(_) => {
+                    // ログインの記録は DB ごと。別の DB に替えたら、前のものは使えない
+                    if app.db_url.as_deref() != Some(db.url.as_str()) {
+                        let _ = asis::room::sign_out();
+                        app.room = None;
+                    }
+                    app.db_url = Some(db.url);
+                    app.form.db_url.clear();
+                    app.form.db_key.clear();
+                    app.notice = Some((
+                        app.t("つなぎ先を変えました", "Database changed").into(),
+                        true,
+                    ));
+                    return update(app, Msg::Refresh);
+                }
+                Err(e) => app.notice = Some((e, false)),
+            }
+        }
+        Msg::AskDelete => app.confirm_delete = true,
         Msg::Again | Msg::Refresh if app.loading => {}
         Msg::Again => {
             app.loading = true;
@@ -291,6 +594,13 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             if modifiers.control() || modifiers.alt() || modifiers.logo() {
                 return Task::none();
             }
+            // 設定の画面を出している間は、Esc で閉じるだけ(打った字を奪わない)
+            if app.pop.is_some() {
+                if key.as_ref() == KeyCode::Named(Named::Escape) {
+                    return update(app, Msg::Pop(None));
+                }
+                return Task::none();
+            }
             // 字を打っている間・中身を出している間は、Esc だけを受ける(打った字を奪わない)
             if app.write.is_some() || app.open {
                 match key.as_ref() {
@@ -347,6 +657,49 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Key(_) => {}
     }
     Task::none()
+}
+
+/// 部屋を変える操作を、DB に送る。作ったときは `created:<番号>`、自分が居なくなる操作は `gone` を返す
+fn run_op(op: Op) -> Result<String, String> {
+    let local = asis::config::load()?;
+    let db = local.db.ok_or("部屋を置く DB が設定にありません")?;
+    let c = asis::room::Client::open(&db)?.ok_or("Sign in していません")?;
+    Ok(match op {
+        Op::Create(name) => format!("created:{}", c.create(&name)?),
+        Op::AddRepo(room, repo) => {
+            c.add_repo(&room, &repo, false)?;
+            format!("{} を足しました", repo.trim())
+        }
+        Op::Everyone(room, repo, on) => {
+            c.add_repo(&room, &repo, on)?;
+            String::new()
+        }
+        Op::DropRepo(room, repo) => {
+            c.drop_repo(&room, &repo)?;
+            format!("{repo} を外しました")
+        }
+        Op::Invite(room, login) => format!("{} を Invite しました", c.invite(&room, &login, &[])?),
+        Op::Role(room, id, role, on) => {
+            c.set_role(&room, id, role, on)?;
+            String::new()
+        }
+        Op::Kick(room, id) => {
+            c.kick(&room, id)?;
+            String::new()
+        }
+        Op::Leave(room) => {
+            c.leave(&room)?;
+            "gone".into()
+        }
+        Op::Checks(room, list) => {
+            c.set_ignore(&room, &list)?;
+            String::new()
+        }
+        Op::Delete(room) => {
+            c.delete(&room)?;
+            "gone".into()
+        }
+    })
 }
 
 /// 書きかけの操作を忘れる(別の 1 件に移ったとき・閉じたとき)
@@ -769,13 +1122,12 @@ fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
     let tasks = lanes(&all);
     let free = loose(&all);
     if all.is_empty() {
-        return container(cap(if app.loading {
-            "Loading from GitHub…"
-        } else {
-            "Nothing to show"
-        }))
-        .center(Length::Fill)
-        .into();
+        let every = items(app);
+        let others = every
+            .iter()
+            .filter(|(v, r)| r.shows(Filter::Others, &v.viewer))
+            .count();
+        return panels::empty(app, every.len(), others);
     }
     if app.look == Look::List {
         let mut body = column![].spacing(8).padding([14, 22]).width(Length::Fill);
@@ -1344,14 +1696,15 @@ fn view(app: &App) -> Element<'_, Msg> {
     // 左端:部屋の列。数字は、その部屋で自分の番の件数
     let tile = |label: String, on: bool, badge: usize, msg: Msg| -> Element<'_, Msg> {
         let accent = app.accent;
-        let inner = column![text(label).size(12).color(if on { accent } else { TEXT })]
+        let size = if label.chars().count() > 4 { 10 } else { 12 };
+        let inner = column![text(label).size(size).color(if on { accent } else { TEXT })]
             .push(if badge > 0 {
                 Element::from(text(badge.to_string()).size(11).color(accent))
             } else {
                 Space::new().into()
             })
             .align_x(Alignment::Center);
-        button(container(inner).center_x(40).center_y(40))
+        button(container(inner).center_x(44).center_y(40))
             .padding(0)
             .style(move |_, status| button::Style {
                 background: Some(
@@ -1395,6 +1748,20 @@ fn view(app: &App) -> Element<'_, Msg> {
         let name: String = short(&s.project).chars().take(4).collect();
         rail = rail.push(tile(name, app.room == Some(i), mine, Msg::Room(Some(i))));
     }
+    rail = rail
+        .push(tile(
+            "+".into(),
+            app.pop == Some(Pop::NewRoom),
+            0,
+            Msg::Pop(Some(Pop::NewRoom)),
+        ))
+        .push(Space::new().height(Length::Fill))
+        .push(tile(
+            "Settings".into(),
+            matches!(app.pop, Some(Pop::Settings(_))),
+            0,
+            Msg::Pop(Some(Pop::Settings(SetTab::Look))),
+        ));
 
     // 2 列目:その部屋の repo とメンバー
     let section = app.room.and_then(|i| app.sections.get(i));
@@ -1512,6 +1879,40 @@ fn view(app: &App) -> Element<'_, Msg> {
         }
     }
 
+    // 部屋(DB の部屋)を開いているときだけ、下に Room settings
+    let side: Element<'_, Msg> = if section.is_some_and(|s| s.room.is_some()) {
+        column![
+            scrollable(side).height(Length::Fill),
+            rule(),
+            button(
+                row![
+                    text("Room settings").size(14).color(DIM),
+                    Space::new().width(Length::Fill),
+                    cap("›"),
+                ]
+                .align_y(Alignment::Center),
+            )
+            .padding([12, 18])
+            .width(Length::Fill)
+            .style(|_, status| button::Style {
+                background: Some(
+                    if matches!(status, button::Status::Hovered) {
+                        PANEL
+                    } else {
+                        Color::TRANSPARENT
+                    }
+                    .into(),
+                ),
+                text_color: TEXT,
+                ..button::Style::default()
+            })
+            .on_press(Msg::Pop(Some(Pop::Room(RoomTab::Members)))),
+        ]
+        .into()
+    } else {
+        scrollable(side).height(Length::Fill).into()
+    };
+
     // 上の段:絞り込み、見せ方、読み直し
     let status = match (app.loading, app.synced) {
         (true, _) => "Loading…".to_string(),
@@ -1546,6 +1947,9 @@ fn view(app: &App) -> Element<'_, Msg> {
     let mut notes = column![].spacing(2);
     if let Some(e) = &app.error {
         notes = notes.push(text(e.clone()).size(13).color(BAD));
+    }
+    if let Rooms::Failed(e) = &app.rooms {
+        notes = notes.push(text(format!("Rooms: {e}")).size(13).color(BAD));
     }
     for s in app
         .sections
@@ -1587,12 +1991,10 @@ fn view(app: &App) -> Element<'_, Msg> {
     .spacing(18)
     .padding([9, 22]);
 
-    let frame = row![
-        container(rail).padding([14, 11]),
-        vrule(),
-        container(scrollable(side)).width(210),
-        vrule(),
-        column![
+    // ボードを出せないとき(GitHub につながっていない・はじめて・読み込み中)は、代わりの画面だけを出す
+    let main: Element<'_, Msg> = match panels::scene(app) {
+        Some(scene) => scene,
+        None => column![
             container(bar).padding([14, 22]),
             rule(),
             container(notes).padding([6, 22]),
@@ -1600,10 +2002,38 @@ fn view(app: &App) -> Element<'_, Msg> {
             rule(),
             foot,
         ]
-        .width(Length::Fill),
+        .into(),
+    };
+    let frame = row![
+        container(rail).padding([14, 9]).height(Length::Fill),
+        vrule(),
+        container(side).width(210),
+        vrule(),
+        container(main).width(Length::Fill),
     ]
     .height(Length::Fill);
     let base: Element<'_, Msg> = container(frame).style(fill(BG)).into();
+    // 設定の画面も、前に出す
+    if let Some((body, width)) = panels::pop(app) {
+        return stack![
+            base,
+            opaque(
+                mouse_area(
+                    container(opaque(
+                        container(body)
+                            .width(width)
+                            .max_height(600)
+                            .style(boxed(LINE2, BG))
+                    ))
+                    .center(Length::Fill)
+                    .padding(40)
+                    .style(fill(Color::from_rgba(0.0, 0.0, 0.0, 0.62)))
+                )
+                .on_press(Msg::Pop(None))
+            ),
+        ]
+        .into();
+    }
     // 選んだ 1 件の中身は、前に大きく出す。ボードの幅を取らないので、カードの形が変わらない
     match detail.filter(|_| app.open || app.write.is_some()) {
         Some(detail) => stack![
@@ -1654,7 +2084,7 @@ fn main() -> iced::Result {
         })
         .unwrap_or((1320.0, 820.0));
     iced::application(boot, update, view)
-        .title("asis")
+        .title(|_: &App| std::env::var("ASIS_TITLE").unwrap_or_else(|_| "asis".into()))
         .subscription(subscription)
         .default_font(Font::with_name(font))
         .window_size(size)

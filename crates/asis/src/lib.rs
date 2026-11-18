@@ -49,6 +49,8 @@ pub struct Source {
 /// プロジェクト名と、その repo ごとの結果
 pub struct Section {
     pub project: String,
+    /// 部屋なら、その部屋の番号
+    pub room: Option<String>,
     /// 部屋のメンバーと、その役割(Review・Merge・Deploy)。部屋でなければ空
     pub people: Vec<(String, String)>,
     pub repos: Vec<Result<RepoView, String>>,
@@ -147,10 +149,33 @@ pub fn run() -> Result<(), String> {
     tui::run(source, filter).map_err(|e| e.to_string())
 }
 
+/// 入っている部屋を読んだ結果
+#[derive(Debug, Clone, PartialEq)]
+pub enum Rooms {
+    /// 部屋を置く DB が設定に無い
+    NoDb,
+    /// DB はあるが、ログインしていない
+    SignedOut,
+    Read(Vec<room::Room>),
+    /// 読めなかった(理由)
+    Failed(String),
+}
+
+/// 手元の設定にある DB から、入っている部屋を読む。
+pub fn read_rooms(local: &config::Local) -> Rooms {
+    let Some(db) = &local.db else {
+        return Rooms::NoDb;
+    };
+    match room::Client::open(db) {
+        Ok(None) => Rooms::SignedOut,
+        Ok(Some(c)) => c.rooms().map_or_else(Rooms::Failed, Rooms::Read),
+        Err(e) => Rooms::Failed(e),
+    }
+}
+
 /// 手元の設定と、入っている部屋から、見るものを決める。
 /// `only_flag` は、その場で指定した絞り込み。あれば、設定や部屋の絞り込みより優先する。
-pub fn default_source(only_flag: &[String]) -> Result<Source, String> {
-    let local = config::load()?;
+pub fn source_of(local: config::Local, rooms: &[room::Room], only_flag: &[String]) -> Source {
     // その場の --only は、設定の絞り込みより優先して全部の repo に当てる。
     let only = if only_flag.is_empty() {
         local.only
@@ -167,14 +192,22 @@ pub fn default_source(only_flag: &[String]) -> Result<Source, String> {
         roots: local.roots.iter().map(|r| expand_home(r)).collect(),
         local: local.projects,
     };
-    // 入っている部屋を足す。部屋を読めなくても、手元の設定の分は出す。
-    if let Some(db) = &local.db {
-        match room::Client::open(db).and_then(|c| c.map(|c| c.rooms()).transpose()) {
-            Ok(rooms) => add_rooms(&mut source, &rooms.unwrap_or_default(), only_flag),
-            Err(e) => eprintln!("部屋を読めませんでした: {e}"),
+    add_rooms(&mut source, rooms, only_flag);
+    source
+}
+
+/// 手元の設定と、入っている部屋から、見るものを決める。部屋を読めなくても、手元の設定の分は出す。
+pub fn default_source(only_flag: &[String]) -> Result<Source, String> {
+    let local = config::load()?;
+    let rooms = match read_rooms(&local) {
+        Rooms::Read(rooms) => rooms,
+        Rooms::Failed(e) => {
+            eprintln!("部屋を読めませんでした: {e}");
+            Vec::new()
         }
-    }
-    Ok(source)
+        Rooms::NoDb | Rooms::SignedOut => Vec::new(),
+    };
+    Ok(source_of(local, &rooms, only_flag))
 }
 
 /// 部屋のメンバーと、その役割を言葉にしたもの。役割が無い人は空。
@@ -196,10 +229,10 @@ pub fn people_of(p: &Project) -> Vec<(String, String)> {
         .collect()
 }
 
-/// 部屋を、見るものに足す。部屋の repo は部屋の決まりで見るので、手元の「見る repo」からは外す。
+/// 部屋を、見るものに足す。repo がまだ無い部屋も足す。部屋の repo は部屋の決まりで見るので、手元の「見る repo」からは外す。
 /// 出すのは部屋のメンバーの分だけ。その場の `--only` があれば、そちらを優先する。
 fn add_rooms(source: &mut Source, rooms: &[room::Room], only_flag: &[String]) {
-    for room in rooms.iter().filter(|r| !r.repos.is_empty()) {
+    for room in rooms {
         for repo in &room.repos {
             source.watch.retain(|w| w != repo);
             let people = if only_flag.is_empty() {
@@ -279,6 +312,11 @@ impl Loader {
             facts: HashMap::new(),
             last_full: None,
         }
+    }
+
+    /// 見るものを替える。読んだ事実は覚えたままにする(同じ repo は読み直さない)。
+    pub fn set_source(&mut self, source: Source) {
+        self.source = source;
     }
 
     /// 定義を読み、変わった repo を同時に読み、指定の順で返す。`force` なら全部 読み直す。
@@ -382,6 +420,7 @@ impl Loader {
             .iter()
             .map(|p| Section {
                 project: p.name.clone(),
+                room: p.room.clone(),
                 people: people_of(p),
                 repos: p
                     .repos
@@ -532,8 +571,9 @@ mod tests {
         };
         add_rooms(&mut source, &rooms, &[]);
         assert_eq!(source.watch, vec!["o/b"]);
-        // repo が無い部屋は出さない
-        assert_eq!(source.local.len(), 1);
+        // repo がまだ無い部屋も出す(作ったばかりの部屋が消えないように)
+        assert_eq!(source.local.len(), 2);
+        assert!(source.local[1].repos.is_empty());
         assert_eq!(source.local[0].review, vec!["alice"]);
         assert_eq!(source.only["o/a"], vec!["alice"]);
         // 「全員」にした repo は絞らない。手元の絞り込みが残っていても外す
@@ -551,6 +591,7 @@ mod tests {
     #[test]
     fn plain_text_lists_groups_and_respects_the_filter() {
         let sections = vec![Section {
+            room: None,
             project: "p".into(),
             people: vec![],
             repos: vec![Ok(view::tests::sample()), Err("x".into())],

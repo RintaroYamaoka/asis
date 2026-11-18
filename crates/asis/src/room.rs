@@ -110,6 +110,7 @@ impl Room {
             merge: self.role(|m| m.merge, self.merge_by_author),
             deploy: self.role(|m| m.deploy, self.deploy_by_author),
             ignore_checks: self.ignore_checks.clone(),
+            room: Some(self.id.clone()),
         }
     }
 
@@ -404,6 +405,180 @@ impl Client {
     pub fn rooms(&self) -> Result<Vec<Room>, String> {
         parse_rooms(&self.send("GET", ROOMS, None)?)
     }
+
+    /// 足すか、すでにあれば書き換える
+    fn upsert(&self, table: &str, conflict: &str, body: &serde_json::Value) -> Result<(), String> {
+        self.http
+            .send(
+                "POST",
+                &format!("/rest/v1/{table}?on_conflict={conflict}"),
+                Some(&self.token),
+                Some(&body.to_string()),
+                Some("resolution=merge-duplicates,return=representation"),
+            )
+            .map(|_| ())
+    }
+
+    /// 変えた行が 1 つも無ければ、管理者ではない(読めない行は変えられない)
+    fn changed(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        no: &str,
+    ) -> Result<(), String> {
+        let out = self.send(method, path, body)?;
+        if out.trim() == "[]" {
+            return Err(no.to_string());
+        }
+        Ok(())
+    }
+
+    /// 部屋を作る。作った人が管理者になる。新しい部屋の番号を返す
+    pub fn create(&self, name: &str) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("部屋の名前がありません".into());
+        }
+        let body = serde_json::json!({ "room_name": name }).to_string();
+        let out = self.send("POST", "/rest/v1/rpc/create_room", Some(&body))?;
+        serde_json::from_str(&out).map_err(|_| format!("作った部屋の番号を読めません: {out}"))
+    }
+
+    /// repo を足す。`everyone` なら、メンバーでない人の分も出す(足し直せば切り替わる)
+    pub fn add_repo(&self, room: &str, repo: &str, everyone: bool) -> Result<(), String> {
+        let repo = repo.trim();
+        let body = serde_json::json!({ "room_id": room, "repo": repo, "everyone": everyone });
+        self.upsert("room_repos", "room_id,repo", &body)
+            .map_err(|e| {
+                if e.contains("check") {
+                    format!("`{repo}` は owner/name の形ではありません")
+                } else {
+                    e
+                }
+            })
+    }
+
+    pub fn drop_repo(&self, room: &str, repo: &str) -> Result<(), String> {
+        self.changed(
+            "DELETE",
+            &format!("/rest/v1/room_repos?room_id=eq.{room}&repo=eq.{repo}"),
+            None,
+            &format!("`{repo}` は外せませんでした(入っていないか、管理者ではありません)"),
+        )
+    }
+
+    /// GitHub のアカウント名で招く。入っている人なら、役割を `roles` に書き換える。正しい名前を返す
+    pub fn invite(&self, room: &str, login: &str, roles: &[Role]) -> Result<String, String> {
+        let (github_id, login) = github_user(login.trim())?;
+        let mut body =
+            serde_json::json!({ "room_id": room, "github_id": github_id, "login": login });
+        for role in Role::ALL {
+            body[role.column()] = roles.contains(&role).into();
+        }
+        self.upsert("room_members", "room_id,github_id", &body)?;
+        Ok(login)
+    }
+
+    /// 1 人の役割を 1 つ、付ける・外す
+    pub fn set_role(&self, room: &str, github_id: i64, role: Role, on: bool) -> Result<(), String> {
+        let body = serde_json::json!({ role.column(): on }).to_string();
+        self.changed(
+            "PATCH",
+            &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{github_id}"),
+            Some(&body),
+            "変えられませんでした(管理者ではありません)",
+        )
+    }
+
+    pub fn kick(&self, room: &str, github_id: i64) -> Result<(), String> {
+        self.changed(
+            "DELETE",
+            &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{github_id}"),
+            None,
+            "外せませんでした(管理者ではありません)",
+        )
+    }
+
+    /// 自分が出る。自分の行だけが消える
+    pub fn leave(&self, room: &str) -> Result<(), String> {
+        let me: i64 = self
+            .send("POST", "/rest/v1/rpc/github_id", Some("{}"))?
+            .trim()
+            .parse()
+            .map_err(|_| "自分の番号を読めません".to_string())?;
+        self.changed(
+            "DELETE",
+            &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{me}"),
+            None,
+            "出られませんでした(この部屋に入っていません)",
+        )
+    }
+
+    /// 数えないチェックの名前を決める
+    pub fn set_ignore(&self, room: &str, names: &[String]) -> Result<(), String> {
+        let list: Vec<&str> = names
+            .iter()
+            .map(|n| n.trim())
+            .filter(|n| !n.is_empty())
+            .collect();
+        let body = serde_json::json!({ "ignore_checks": list }).to_string();
+        self.changed(
+            "PATCH",
+            &format!("/rest/v1/rooms?id=eq.{room}"),
+            Some(&body),
+            "変えられませんでした(管理者ではありません)",
+        )
+    }
+
+    pub fn delete(&self, room: &str) -> Result<(), String> {
+        self.changed(
+            "DELETE",
+            &format!("/rest/v1/rooms?id=eq.{room}"),
+            None,
+            "消せませんでした(管理者ではありません)",
+        )
+    }
+}
+
+/// 部屋の中の役割
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Review,
+    Merge,
+    Deploy,
+    Admin,
+}
+
+impl Role {
+    pub const ALL: [Role; 4] = [Role::Review, Role::Merge, Role::Deploy, Role::Admin];
+
+    fn column(self) -> &'static str {
+        match self {
+            Role::Review => "review",
+            Role::Merge => "merge",
+            Role::Deploy => "deploy",
+            Role::Admin => "is_admin",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Review => "Review",
+            Role::Merge => "Merge",
+            Role::Deploy => "Deploy",
+            Role::Admin => "Admin",
+        }
+    }
+
+    pub fn of(self, m: &Member) -> bool {
+        match self {
+            Role::Review => m.review,
+            Role::Merge => m.merge,
+            Role::Deploy => m.deploy,
+            Role::Admin => m.is_admin,
+        }
+    }
 }
 
 fn open_browser(url: &str) {
@@ -433,11 +608,19 @@ fn open_browser(url: &str) {
 const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>asis</title>\
 <body style=\"font-family:sans-serif;padding:3em\"><h2>asis</h2><p>";
 
+/// ログインを待つ長さ。ブラウザで何もしなければ、ここで諦める(受け口を開けたままにしない)
+const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
 /// GitHub でログインする。ブラウザを開き、戻りをこの PC の中で受ける。
-fn login(db: &Db) -> Result<(), String> {
+/// `show` には、ブラウザが開かないときに人が開く URL を渡す。
+pub fn sign_in(db: &Db, show: &dyn Fn(&str)) -> Result<(), String> {
     let http = Http::new(db);
     let listener = std::net::TcpListener::bind(CALLBACK)
         .map_err(|e| format!("ログインの戻りを受ける場所({CALLBACK})を開けません: {e}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| format!("ログインの戻りを待てません: {e}"))?;
+    let deadline = std::time::Instant::now() + SIGN_IN_WAIT;
     let verifier = new_verifier()?;
     let url = format!(
         "{}/auth/v1/authorize?provider=github&redirect_to=http%3A%2F%2F{}%2Fcallback\
@@ -446,12 +629,23 @@ fn login(db: &Db) -> Result<(), String> {
         CALLBACK.replace(':', "%3A"),
         challenge(&verifier)
     );
-    println!(
-        "ブラウザで GitHub のログインを開きます。開かないときは、次を開いてください。\n\n{url}\n"
-    );
+    show(&url);
     open_browser(&url);
     loop {
-        let (mut stream, _) = listener.accept().map_err(|e| e.to_string())?;
+        let mut stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                if std::time::Instant::now() > deadline {
+                    return Err(
+                        "ログインを待ちきれませんでした。もう一度 Sign in してください".into(),
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let _ = stream.set_nonblocking(false);
         let mut line = String::new();
         if BufReader::new(&stream).read_line(&mut line).is_err() || !line.contains("/callback") {
             let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n");
@@ -473,9 +667,17 @@ fn login(db: &Db) -> Result<(), String> {
             "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
             page.len()
         );
-        save_session(&result?)?;
-        println!("ログインしました。");
-        return Ok(());
+        return save_session(&result?);
+    }
+}
+
+/// ログインの記録を消す。消したものがあれば true
+pub fn sign_out() -> Result<bool, String> {
+    let path = session_path()?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 
@@ -604,16 +806,22 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         return Err(format!("知らない指定です: {bad}\n\n{HELP}"));
     }
     match words.as_slice() {
-        ["login"] => login(&need_db()?),
+        ["login"] => {
+            sign_in(&need_db()?, &|url| {
+                println!("ブラウザで GitHub のログインを開きます。開かないときは、次を開いてください。\n\n{url}\n")
+            })?;
+            println!("ログインしました。");
+            Ok(())
+        }
         ["logout"] => {
-            let path = session_path()?;
-            match std::fs::remove_file(&path) {
-                Ok(()) => println!("ログインの記録を消しました。"),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    println!("ログインしていません。")
+            println!(
+                "{}",
+                if sign_out()? {
+                    "ログインの記録を消しました。"
+                } else {
+                    "ログインしていません。"
                 }
-                Err(e) => return Err(format!("{}: {e}", path.display())),
-            }
+            );
             Ok(())
         }
         ["room"] => {
@@ -622,8 +830,7 @@ pub fn cli(args: &[String]) -> Result<(), String> {
         }
         ["room", "new", name] => {
             let c = client()?;
-            let body = serde_json::json!({ "room_name": name }).to_string();
-            c.send("POST", "/rest/v1/rpc/create_room", Some(&body))?;
+            c.create(name)?;
             print!("{}", rooms_text(&c.rooms()?));
             Ok(())
         }
@@ -633,54 +840,14 @@ pub fn cli(args: &[String]) -> Result<(), String> {
             let room = find(&rooms, name)?;
             let id = &room.id;
             match (*action, rest) {
-                ("add", [repo]) => {
-                    let body = serde_json::json!({
-                        "room_id": id, "repo": repo, "everyone": flag("--everyone"),
-                    })
-                    .to_string();
-                    c.http
-                        .send(
-                            "POST",
-                            "/rest/v1/room_repos?on_conflict=room_id,repo",
-                            Some(&c.token),
-                            Some(&body),
-                            Some("resolution=merge-duplicates,return=representation"),
-                        )
-                        .map_err(|e| {
-                            if e.contains("check") {
-                                format!("`{repo}` は owner/name の形ではありません")
-                            } else {
-                                e
-                            }
-                        })?;
-                }
-                ("drop", [repo]) => {
-                    let gone = c.send(
-                        "DELETE",
-                        &format!("/rest/v1/room_repos?room_id=eq.{id}&repo=eq.{repo}"),
-                        None,
-                    )?;
-                    if gone.trim() == "[]" {
-                        return Err(format!(
-                            "`{repo}` は外せませんでした(入っていないか、管理者ではありません)"
-                        ));
-                    }
-                }
+                ("add", [repo]) => c.add_repo(id, repo, flag("--everyone"))?,
+                ("drop", [repo]) => c.drop_repo(id, repo)?,
                 ("invite", [login]) => {
-                    let (github_id, login) = github_user(login)?;
-                    let body = serde_json::json!({
-                        "room_id": id, "github_id": github_id, "login": login,
-                        "review": flag("--review"), "merge": flag("--merge"),
-                        "deploy": flag("--deploy"), "is_admin": flag("--admin"),
-                    })
-                    .to_string();
-                    c.http.send(
-                        "POST",
-                        "/rest/v1/room_members?on_conflict=room_id,github_id",
-                        Some(&c.token),
-                        Some(&body),
-                        Some("resolution=merge-duplicates,return=representation"),
-                    )?;
+                    let roles: Vec<Role> = Role::ALL
+                        .into_iter()
+                        .filter(|r| flag(&format!("--{}", r.label().to_lowercase())))
+                        .collect();
+                    c.invite(id, login, &roles)?;
                 }
                 ("kick", [login]) => {
                     let member = room
@@ -688,50 +855,14 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                         .iter()
                         .find(|m| m.login.eq_ignore_ascii_case(login))
                         .ok_or(format!("`{login}` はこの部屋にいません"))?;
-                    let gone = c.send(
-                        "DELETE",
-                        &format!(
-                            "/rest/v1/room_members?room_id=eq.{id}&github_id=eq.{}",
-                            member.github_id
-                        ),
-                        None,
-                    )?;
-                    if gone.trim() == "[]" {
-                        return Err("外せませんでした(管理者ではありません)".into());
-                    }
+                    c.kick(id, member.github_id)?;
                 }
-                ("leave", []) => {
-                    // 自分の行だけが消える(ほかの人の行は、管理者でなければ消せない)。
-                    let me: i64 = c
-                        .send("POST", "/rest/v1/rpc/github_id", Some("{}"))?
-                        .trim()
-                        .parse()
-                        .map_err(|_| "自分の番号を読めません".to_string())?;
-                    c.send(
-                        "DELETE",
-                        &format!("/rest/v1/room_members?room_id=eq.{id}&github_id=eq.{me}"),
-                        None,
-                    )?;
-                }
+                ("leave", []) => c.leave(id)?,
                 ("ignore", [names]) => {
-                    let list: Vec<&str> = names
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|n| !n.is_empty())
-                        .collect();
-                    let body = serde_json::json!({ "ignore_checks": list }).to_string();
-                    let changed =
-                        c.send("PATCH", &format!("/rest/v1/rooms?id=eq.{id}"), Some(&body))?;
-                    if changed.trim() == "[]" {
-                        return Err("変えられませんでした(管理者ではありません)".into());
-                    }
+                    let list: Vec<String> = names.split(',').map(str::to_string).collect();
+                    c.set_ignore(id, &list)?;
                 }
-                ("delete", []) => {
-                    let gone = c.send("DELETE", &format!("/rest/v1/rooms?id=eq.{id}"), None)?;
-                    if gone.trim() == "[]" {
-                        return Err("消せませんでした(管理者ではありません)".into());
-                    }
-                }
+                ("delete", []) => c.delete(id)?,
                 _ => return Err(HELP.to_string()),
             }
             print!("{}", rooms_text(&c.rooms()?));
@@ -771,6 +902,10 @@ mod tests {
         // 本番に出す役の人がいなくても、「出した本人」にしていればそれが入る
         assert_eq!(p.deploy, vec![AUTHOR]);
         assert_eq!(p.ignore_checks, vec!["Preview"]);
+        assert_eq!(
+            p.room.as_deref(),
+            Some("11111111-1111-1111-1111-111111111111")
+        );
     }
 
     #[test]

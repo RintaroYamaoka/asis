@@ -429,6 +429,7 @@ mod tests {
     fn app(filter: Filter, cursor: usize) -> App {
         App {
             sections: vec![Section {
+                room: None,
                 project: "shop".into(),
                 people: vec![],
                 repos: vec![Ok(sample()), Err("o/x: 権限がありません".into())],
