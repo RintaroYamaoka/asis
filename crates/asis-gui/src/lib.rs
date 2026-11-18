@@ -17,6 +17,23 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Subscription, Task, 
 use panels::{Pop, RoomTab, SetTab};
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// 窓の上の帯を、自分で描くか。WSL の窓は、OS が描く帯が白くて画面に合わないので、自分で描く
+static OWN_BAR: OnceLock<bool> = OnceLock::new();
+
+fn own_bar() -> bool {
+    *OWN_BAR.get().unwrap_or(&false)
+}
+
+/// 窓の操作
+#[derive(Debug, Clone, Copy)]
+enum Win {
+    Drag,
+    Minimize,
+    Maximize,
+    Close,
+    Resize(iced::window::Direction),
+}
+
 /// 差し込まれた読み口(repo の中のファイルに書かれたタスク)。`run` で決まり、読み込みのたびに使う
 static READER: OnceLock<Option<Arc<dyn asis::extra::Reader>>> = OnceLock::new();
 
@@ -151,6 +168,8 @@ impl App {
 
 #[derive(Clone)]
 enum Msg {
+    /// 自分で描いた上の帯からの、窓の操作
+    Win(Win),
     Loaded(Result<Snapshot, String>),
     GhChecked(Gh),
     CheckGh,
@@ -553,6 +572,16 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             app.pr = pr;
             app.open = true;
             forget(app);
+        }
+        Msg::Win(op) => {
+            use iced::window;
+            return window::latest().and_then(move |id| match op {
+                Win::Drag => window::drag(id),
+                Win::Minimize => window::minimize(id, true),
+                Win::Maximize => window::toggle_maximize(id),
+                Win::Close => window::close(id),
+                Win::Resize(d) => window::drag_resize(id, d),
+            });
         }
         Msg::Close => {
             app.open = false;
@@ -1745,7 +1774,93 @@ fn repos_of(app: &App) -> Vec<String> {
     out
 }
 
+/// 窓の中身。上の帯を自分で描くときは、帯と、端をつかんで大きさを変える所を足す
 fn view(app: &App) -> Element<'_, Msg> {
+    if !own_bar() {
+        return screen(app);
+    }
+    use iced::mouse::Interaction;
+    use iced::window::Direction;
+    let key = |label: &'static str, op: Win| {
+        button(text(label).size(13).color(DIM))
+            .padding([6, 14])
+            .style(|_, status| button::Style {
+                background: matches!(status, button::Status::Hovered).then(|| PANEL.into()),
+                text_color: DIM,
+                ..button::Style::default()
+            })
+            .on_press(Msg::Win(op))
+    };
+    let bar = container(
+        row![
+            mouse_area(
+                container(text("asis").size(13).color(DIM))
+                    .padding([0, 14])
+                    .center_y(Length::Fill)
+                    .width(Length::Fill)
+            )
+            .on_press(Msg::Win(Win::Drag)),
+            key("—", Win::Minimize),
+            key("□", Win::Maximize),
+            key("✕", Win::Close),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .height(32)
+    .style(fill(BG));
+    let grip = |w: Length, h: Length, d: Direction, i: Interaction| {
+        mouse_area(Space::new().width(w).height(h))
+            .interaction(i)
+            .on_press(Msg::Win(Win::Resize(d)))
+    };
+    let (edge, fill_) = (Length::Fixed(5.0), Length::Fill);
+    let grips = column![
+        row![
+            grip(
+                edge,
+                fill_,
+                Direction::West,
+                Interaction::ResizingHorizontally
+            ),
+            Space::new().width(fill_),
+            grip(
+                edge,
+                fill_,
+                Direction::East,
+                Interaction::ResizingHorizontally
+            ),
+        ]
+        .height(fill_),
+        row![
+            grip(
+                Length::Fixed(12.0),
+                edge,
+                Direction::SouthWest,
+                Interaction::ResizingDiagonallyUp
+            ),
+            grip(
+                fill_,
+                edge,
+                Direction::South,
+                Interaction::ResizingVertically
+            ),
+            grip(
+                Length::Fixed(12.0),
+                edge,
+                Direction::SouthEast,
+                Interaction::ResizingDiagonallyDown
+            ),
+        ],
+    ];
+    let body = column![
+        bar,
+        container(Space::new().width(Length::Fill).height(1)).style(fill(LINE)),
+        screen(app)
+    ];
+    stack![container(body).style(boxed(LINE2, BG)).padding(1), grips].into()
+}
+
+fn screen(app: &App) -> Element<'_, Msg> {
     let all = items(app);
     let count = |f: Filter| all.iter().filter(|(v, r)| r.shows(f, &v.viewer)).count();
 
@@ -2128,6 +2243,35 @@ fn subscription(_: &App) -> Subscription<Msg> {
     })
 }
 
+/// Windows の表示の拡大(1.0 = 100%)。WSL の中から、Windows の設定を聞く
+fn windows_scale() -> Option<f32> {
+    // PATH に Windows の場所が無い開き方(メニューからなど)でも聞けるように、置き場でも試す
+    let out = ["reg.exe", "/mnt/c/Windows/System32/reg.exe"]
+        .iter()
+        .find_map(|reg| {
+            asis::command(reg)
+                .args([
+                    "query",
+                    r"HKCU\Control Panel\Desktop\WindowMetrics",
+                    "/v",
+                    "AppliedDPI",
+                ])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+        })?;
+    scale_of(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `reg query` の返事(`AppliedDPI    REG_DWORD    0x90`)から、拡大を読む。96 が 100%
+fn scale_of(reply: &str) -> Option<f32> {
+    let hex = reply
+        .split_whitespace()
+        .find_map(|w| w.strip_prefix("0x"))?;
+    let dpi = u32::from_str_radix(hex, 16).ok()?;
+    (96..=480).contains(&dpi).then(|| dpi as f32 / 96.0)
+}
+
 /// 窓を開く。`reader` を渡すと、repo の中のファイルに書かれたタスクも出す(`asis::extra` を参照)
 pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
     let _ = READER.set(reader);
@@ -2140,9 +2284,20 @@ pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
         "Noto Sans JP"
     };
     // WSL の Wayland は、窓を出す途中で切れることがある。X11 で出す。
-    if std::env::var_os("WSL_DISTRO_NAME").is_some() {
+    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
+    if wsl {
         std::env::remove_var("WAYLAND_DISPLAY");
+        // WSL の窓には、Windows の表示の拡大(150% など)が伝わらず、字も窓も小さく出る。
+        // Windows の今の拡大を聞いて、同じ大きさにする。`WINIT_X11_SCALE_FACTOR` があれば、そちらを使う
+        if std::env::var_os("WINIT_X11_SCALE_FACTOR").is_none() {
+            if let Some(scale) = windows_scale() {
+                std::env::set_var("WINIT_X11_SCALE_FACTOR", scale.to_string());
+            }
+        }
     }
+    // WSL の窓は、OS が描く上の帯が白い。帯を消して、自分で描く(`ASIS_BAR=os` で OS の帯に戻せる)
+    let own = wsl && std::env::var("ASIS_BAR").as_deref() != Ok("os");
+    let _ = OWN_BAR.set(own);
     // 窓の最初の大きさ。`ASIS_WINDOW=1366x768` で変えられる(いろいろな画面の形で確かめる用)
     let size = std::env::var("ASIS_WINDOW")
         .ok()
@@ -2164,7 +2319,23 @@ pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
                 64,
             )
             .ok(),
+            decorations: !own,
             ..iced::window::Settings::default()
         })
         .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_scale_is_read_from_the_registry_reply() {
+        let reply = "\r\nHKEY_CURRENT_USER\\Control Panel\\Desktop\\WindowMetrics\r\n    AppliedDPI    REG_DWORD    0x90\r\n";
+        assert_eq!(scale_of(reply), Some(1.5));
+        assert_eq!(scale_of("    AppliedDPI    REG_DWORD    0x60"), Some(1.0));
+        // 読めない返事・ありえない値は使わない
+        assert_eq!(scale_of("ERROR"), None);
+        assert_eq!(scale_of("AppliedDPI REG_DWORD 0x1"), None);
+    }
 }
