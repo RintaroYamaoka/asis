@@ -74,6 +74,7 @@ mod tests {
             is_open: open,
             author: String::new(),
             assignees: vec![],
+            body: String::new(),
         }
     }
     fn v(state: PrState, turn: &[&str]) -> PrVerdict {

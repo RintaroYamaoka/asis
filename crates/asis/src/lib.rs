@@ -1,6 +1,7 @@
 //! asis — development, as is.
 //! 判断は asis-core、事実を読むのは github、並べるのは view、部屋は room。
 //! 画面(TUI・GUI)は、ここの `Loader` が返すものを描くだけ。
+pub mod act;
 pub mod config;
 pub mod github;
 pub mod local;

@@ -41,7 +41,7 @@ query($owner:String!,$name:String!){
     assignableUsers(first:100){nodes{login}}
   }
 }
-fragment I on Issue { number title state updatedAt author{login} assignees(first:5){nodes{login}} }"#;
+fragment I on Issue { number title state updatedAt body author{login} assignees(first:5){nodes{login}} }"#;
 
 pub struct RepoFacts {
     pub repo: String,
@@ -239,6 +239,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
                 is_open: i["state"] == "OPEN",
                 author: s(&i["author"]["login"]),
                 assignees: nodes(&i["assignees"]).map(|a| s(&a["login"])).collect(),
+                body: s(&i["body"]),
             })
         })
         .collect();

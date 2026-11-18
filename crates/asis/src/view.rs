@@ -115,6 +115,8 @@ pub struct Row {
     pub age: String,
     /// なぜこの状態か
     pub why: String,
+    /// issue の本文。書かれたまま。issue でなければ空
+    pub body: String,
     pub prs: Vec<PrLine>,
     /// この PC の上で、この行の作業をしている worktree
     pub local: Vec<LocalLine>,
@@ -309,6 +311,7 @@ pub fn build(
             } else {
                 task_label(t.state).to_string()
             },
+            body: issue.body.clone(),
             prs: idx.iter().map(|i| line(*i)).collect(),
             local,
         });
@@ -331,6 +334,7 @@ pub fn build(
             turn: v.turn.clone(),
             age: age(&f.pr_updated[i], now),
             why: why_pr(v.reason, &f.pr_failing[i]),
+            body: String::new(),
             prs: vec![line(i)],
             local: local_for(&|b| open_branch(i) == Some(b)),
         });
@@ -356,6 +360,7 @@ pub fn build(
             turn: vec![f.viewer.clone()],
             age: String::new(),
             why: "手元で作業中・まだ PR が無い".into(),
+            body: String::new(),
             prs: vec![],
             local: vec![l],
         });
@@ -553,6 +558,7 @@ pub(crate) mod tests {
                     is_open: true,
                     author: "cat".into(),
                     assignees: vec![],
+                    body: String::new(),
                 },
                 IssueFacts {
                     repo: "o/r".into(),
@@ -561,6 +567,7 @@ pub(crate) mod tests {
                     is_open: true,
                     author: "bob".into(),
                     assignees: vec![],
+                    body: String::new(),
                 },
                 IssueFacts {
                     repo: "o/r".into(),
@@ -569,6 +576,7 @@ pub(crate) mod tests {
                     is_open: false,
                     author: "ann".into(),
                     assignees: vec![],
+                    body: String::new(),
                 },
             ],
             branches: vec![],

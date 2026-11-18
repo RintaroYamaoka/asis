@@ -62,6 +62,8 @@ pub struct IssueFacts {
     /// 起票した人
     pub author: String,
     pub assignees: Vec<String>,
+    /// 本文。書かれたまま(型は求めない)。状態の判断には使わない
+    pub body: String,
 }
 
 /// 役割の欄に書ける特別な名前。その PR を出した本人を指す。
