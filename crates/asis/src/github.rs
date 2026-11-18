@@ -3,7 +3,6 @@
 use crate::{lang, say};
 use asis_core::facts::*;
 use serde_json::Value;
-use std::process::Command;
 
 /// 開いている PR。状態を決めるのに要るものを全部 取る。
 const OPEN_QUERY: &str = r#"
@@ -154,7 +153,7 @@ pub fn gh_state(ran: Result<(bool, String, String), std::io::ErrorKind>) -> Gh {
 /// gh が使えるか、誰としてログインしているかを聞く(GitHub に 1 回 聞く)
 pub fn whoami() -> Gh {
     gh_state(
-        Command::new("gh")
+        crate::command("gh")
             .args(["api", "user", "--jq", ".login"])
             .output()
             .map(|o| {
@@ -169,7 +168,7 @@ pub fn whoami() -> Gh {
 }
 
 fn ask(query: &str, owner: &str, name: &str) -> Result<Value, String> {
-    let out = Command::new("gh")
+    let out = crate::command("gh")
         .args(["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}")])
         .output()
         .map_err(|e| say!("gh を実行できません({e})。GitHub の公式コマンド gh を入れて `gh auth login` してください", "Cannot run gh ({e}). Install GitHub's official command gh and run `gh auth login`"))?;
@@ -391,7 +390,7 @@ pub fn stamps(repos: &[String]) -> Result<Vec<String>, String> {
         ));
     }
     query.push('}');
-    let out = Command::new("gh")
+    let out = crate::command("gh")
         .args(["api", "graphql", "-f", &format!("query={query}")])
         .output()
         .map_err(lang::no_gh)?;

@@ -132,9 +132,9 @@ pub fn run(source: Source, filter: Filter) -> std::io::Result<()> {
 
 /// GitHub のページをブラウザで開く。その環境にある開き方を順に試す。
 fn open(url: &str) {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     for opener in ["wslview", "xdg-open", "open"] {
-        if Command::new(opener)
+        if crate::command(opener)
             .arg(url)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -144,7 +144,7 @@ fn open(url: &str) {
             return;
         }
     }
-    let _ = Command::new("cmd")
+    let _ = crate::command("cmd")
         .args(["/C", "start", "", url])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -23,6 +23,23 @@ asis add <owner/repo> --only alice,bob   # その repo では、その人たち�
 asis --plain                  # 画面を開かず、文字で出す
 ```
 
+### 窓の画面
+
+```
+cargo install --path crates/asis-gui
+asis-gui
+```
+
+### Windows
+
+`dist/asis-windows.zip` を開いて、中の `install.ps1` を動かす(管理者の権限は要らない)。スタートメニューに「asis」が入る。
+
+```
+powershell -ExecutionPolicy Bypass -File install.ps1
+```
+
+zip は、Linux か WSL の上で `scripts/build-windows.sh` で作る。
+
 ## 部屋
 
 repo・メンバー・役割を人と共有するときは、部屋を使う。部屋は DB(Supabase)に置く。DB に入るのは部屋の定義だけで、issue・PR・コードは入らない。

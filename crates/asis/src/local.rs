@@ -2,7 +2,6 @@
 //! PR になる前の作業は GitHub からは見えないので、ここで拾う。判断はしない。
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// ターミナルのペイン
 #[derive(Debug, Clone, PartialEq)]
@@ -112,7 +111,7 @@ pub fn attach(mut works: Vec<Work>, panes: &[Pane]) -> Vec<Work> {
 
 fn panes() -> Vec<Pane> {
     // ターミナルの道具が無い・動いていないときは、ペイン無しとして進む。
-    let out = Command::new("herdr").args(["pane", "list"]).output();
+    let out = crate::command("herdr").args(["pane", "list"]).output();
     let Ok(out) = out else { return vec![] };
     if !out.status.success() {
         return vec![];
@@ -124,7 +123,7 @@ fn panes() -> Vec<Pane> {
 
 /// その場所を含む repo の、いちばん上のフォルダ(worktree なら、その worktree の上)。
 fn toplevel(dir: &Path) -> Option<PathBuf> {
-    let out = Command::new("git")
+    let out = crate::command("git")
         .arg("-C")
         .arg(dir)
         .args(["rev-parse", "--show-toplevel"])
@@ -136,7 +135,7 @@ fn toplevel(dir: &Path) -> Option<PathBuf> {
 }
 
 fn origin(dir: &Path) -> Option<String> {
-    let out = Command::new("git")
+    let out = crate::command("git")
         .arg("-C")
         .arg(dir)
         .args(["remote", "get-url", "origin"])
@@ -181,7 +180,7 @@ pub fn gather(repos: &[String], roots: &[PathBuf]) -> Vec<Work> {
         let Some(repo) = origin(&top).filter(|r| repos.contains(r)) else {
             continue;
         };
-        let Ok(out) = Command::new("git")
+        let Ok(out) = crate::command("git")
             .arg("-C")
             .arg(&top)
             .args(["worktree", "list", "--porcelain"])

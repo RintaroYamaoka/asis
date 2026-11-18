@@ -662,7 +662,7 @@ impl Role {
 }
 
 fn open_browser(url: &str) {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     // `&` を含むので、コマンドの文として解釈する開き方(cmd の start)は使わない。
     let tries: [(&str, &[&str]); 5] = [
         ("wslview", &[]),
@@ -672,7 +672,7 @@ fn open_browser(url: &str) {
         ("explorer.exe", &[]),
     ];
     for (program, args) in tries {
-        if Command::new(program)
+        if crate::command(program)
             .args(args)
             .arg(url)
             .stdout(Stdio::null())
@@ -803,7 +803,7 @@ fn current_logins(ids: &[i64]) -> std::collections::HashMap<i64, String> {
     };
     for id in ids {
         known.entry(*id).or_insert_with(|| {
-            let out = std::process::Command::new("gh")
+            let out = crate::command("gh")
                 .args(["api", &format!("user/{id}"), "-q", ".login"])
                 .output()
                 .ok()?;
@@ -824,7 +824,7 @@ fn github_user(login: &str) -> Result<(i64, String), String> {
             "`{login}` is not a GitHub account name"
         ));
     }
-    let out = std::process::Command::new("gh")
+    let out = crate::command("gh")
         .args([
             "api",
             &format!("users/{login}"),

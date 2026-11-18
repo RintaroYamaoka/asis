@@ -9,3 +9,7 @@ license = "MIT"
 asis = { path = "../asis" }
 # GPU を使わず CPU で描く(tiny-skia)。GPU で描くと、同じ画面でメモリが 10 倍以上になる。
 iced = { version = "0.14", default-features = false, features = ["tiny-skia", "thread-pool", "x11", "wayland", "crisp"] }
+
+[build-dependencies]
+# Windows の exe に印を入れる
+winresource = "0.1"

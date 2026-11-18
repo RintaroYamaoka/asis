@@ -752,7 +752,7 @@ fn forget(app: &mut App) {
 
 /// GitHub のページをブラウザで開く
 fn open(url: &str) {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let tries: [(&str, &[&str]); 5] = [
         ("wslview", &[]),
         ("xdg-open", &[]),
@@ -761,7 +761,7 @@ fn open(url: &str) {
         ("explorer.exe", &[]),
     ];
     for (program, args) in tries {
-        if Command::new(program)
+        if asis::command(program)
             .args(args)
             .arg(url)
             .stdout(Stdio::null())
@@ -2155,6 +2155,16 @@ pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
         .title(|_: &App| std::env::var("ASIS_TITLE").unwrap_or_else(|_| "asis".into()))
         .subscription(subscription)
         .default_font(Font::with_name(font))
-        .window_size(size)
+        .window(iced::window::Settings {
+            size: iced::Size::new(size.0, size.1),
+            // 窓の左上とタスクバーに出る印
+            icon: iced::window::icon::from_rgba(
+                include_bytes!("../assets/icon-64.rgba").to_vec(),
+                64,
+                64,
+            )
+            .ok(),
+            ..iced::window::Settings::default()
+        })
         .run()
 }

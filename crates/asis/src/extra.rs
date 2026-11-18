@@ -5,7 +5,6 @@
 //! 返ってきたタスクを issue と同じ規則(つながる PR の事実)で並べること。
 //! 差し込まなければ、今までどおり issue と PR だけで動く。
 use serde_json::Value;
-use std::process::Command;
 
 /// 差し込む側が作るもの
 pub trait Reader: Send + Sync {
@@ -70,7 +69,7 @@ fn encode_path(path: &str) -> String {
 }
 
 fn gh(args: &[&str]) -> Result<Vec<u8>, String> {
-    let out = Command::new("gh")
+    let out = crate::command("gh")
         .args(args)
         .output()
         .map_err(crate::lang::no_gh)?;

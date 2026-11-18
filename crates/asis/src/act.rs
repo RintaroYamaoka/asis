@@ -3,7 +3,6 @@
 //! 操作がやるのは、GitHub の上の事実を作ることだけ(issue ができる・承認が付く・取り込まれる)。
 //! 状態は、その事実から今までどおり決まる。ここから状態を直接 変えることはできない。
 use crate::{lang, say};
-use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
@@ -160,7 +159,7 @@ fn explain(stderr: &str, stdout: &str) -> String {
 }
 
 fn gh(args: &[String]) -> Result<String, String> {
-    let out = Command::new("gh")
+    let out = crate::command("gh")
         .args(args)
         .output()
         .map_err(lang::no_gh)?;

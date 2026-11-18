@@ -17,6 +17,20 @@ use std::io::IsTerminal;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use view::{Filter, RepoView};
 
+/// 外のコマンド(gh・git など)を呼ぶ。
+/// Windows の窓のアプリから呼ぶと、呼ぶたびに黒い窓が一瞬 出るので、出さない印を付ける
+pub fn command(program: &str) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut c = std::process::Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        c.creation_flags(CREATE_NO_WINDOW);
+    }
+    c
+}
+
 const HELP: &str = "asis — development, as is
 
 使い方:
