@@ -28,8 +28,14 @@ set role authenticated;
 select pg_temp.act('');
 select pg_temp.fails($$select public.create_room('x','x')$$, '28000');
 
--- alice が部屋を作る。本人が管理者で、全部の役を持つ
+-- 許可の一覧に載っていない人は部屋を作れない。一覧は API の役からは読めも書けもしない
 select pg_temp.act('00000000-0000-0000-0000-00000000000a');
+select pg_temp.fails($$select public.create_room('team','alice')$$, '42501');
+select pg_temp.fails($$insert into public.room_creators (github_id) values (101)$$, '42501');
+select pg_temp.fails($$select 1 from public.room_creators$$, '42501');
+reset role; insert into public.room_creators (github_id) values (101); set role authenticated;
+
+-- alice が部屋を作る。本人が管理者で、全部の役を持つ
 insert into pg_temp.ids select public.create_room('team', 'alice');
 select pg_temp.count_is($$select 1 from public.room_members where login='alice' and is_admin and review and merge and deploy$$, 1);
 
@@ -41,8 +47,9 @@ insert into public.room_repos select room, 'acme/app' from pg_temp.ids;
 insert into public.room_members (room_id, github_id, login) select room, 102, 'bob' from pg_temp.ids;
 select pg_temp.fails($$insert into public.room_repos select room, 'not a repo' from pg_temp.ids$$, '23514');
 
--- 招かれた bob には部屋が見える。変えることはできない
+-- 招かれた bob には部屋が見える。変えることも、自分の部屋を作ることもできない
 select pg_temp.act('00000000-0000-0000-0000-00000000000b');
+select pg_temp.fails($$select public.create_room('mine','bob')$$, '42501');
 select pg_temp.count_is('select 1 from public.rooms', 1);
 select pg_temp.count_is('select 1 from public.room_repos', 1);
 select pg_temp.count_is('select 1 from public.room_members', 2);
