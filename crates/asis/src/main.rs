@@ -3,6 +3,7 @@
 mod config;
 mod github;
 mod local;
+mod room;
 mod tui;
 mod view;
 
@@ -20,6 +21,8 @@ const HELP: &str = "asis — development, as is
   asis add <owner/repo>    見る repo に足す(--only を付けると、その人の分だけ出す)
   asis remove <owner/repo> 見る repo から外す
   asis init                repo に置く定義ファイル(.asis.toml)のひな形を出す
+  asis login               GitHub でログインする(部屋を使うとき)
+  asis room                部屋(repo・メンバー・役割をまとめたもの)。`asis room help` で一覧
 
   --plain                  画面を開かず、文字で出す
   --mine                   自分の番のものだけ出す
@@ -58,7 +61,14 @@ fn main() {
 fn run() -> Result<(), String> {
     let mut repos = Vec::new();
     let (mut plain, mut filter, mut only) = (false, Filter::All, Vec::new());
-    let mut args = std::env::args().skip(1);
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(
+        raw.first().map(String::as_str),
+        Some("login" | "logout" | "room")
+    ) {
+        return room::cli(&raw);
+    }
+    let mut args = raw.into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             "-h" | "--help" => {
@@ -104,6 +114,7 @@ fn run() -> Result<(), String> {
         }
         _ => {}
     }
+    let only_flag = only.clone();
     let source = if repos.is_empty() {
         let local = config::load()?;
         // その場の --only は、設定の絞り込みより優先して全部の repo に当てる。
@@ -116,12 +127,20 @@ fn run() -> Result<(), String> {
                 .map(|r| (r.clone(), only.clone()))
                 .collect()
         };
-        Source {
+        let mut source = Source {
             watch: local.watch,
             only,
             roots: local.roots.iter().map(|r| expand_home(r)).collect(),
             local: local.projects,
+        };
+        // 入っている部屋を足す。部屋を読めなくても、手元の設定の分は出す。
+        if let Some(db) = &local.db {
+            match room::Client::open(db).and_then(|c| c.map(|c| c.rooms()).transpose()) {
+                Ok(rooms) => add_rooms(&mut source, &rooms.unwrap_or_default(), &only_flag),
+                Err(e) => eprintln!("部屋を読めませんでした: {e}"),
+            }
         }
+        source
     } else {
         let only = if only.is_empty() {
             Default::default()
@@ -160,6 +179,23 @@ fn run() -> Result<(), String> {
         };
     }
     tui::run(source, filter).map_err(|e| e.to_string())
+}
+
+/// 部屋を、見るものに足す。部屋の repo は部屋の決まりで見るので、手元の「見る repo」からは外す。
+/// 出すのは部屋のメンバーの分だけ。その場の `--only` があれば、そちらを優先する。
+fn add_rooms(source: &mut Source, rooms: &[room::Room], only_flag: &[String]) {
+    for room in rooms.iter().filter(|r| !r.repos.is_empty()) {
+        for repo in &room.repos {
+            source.watch.retain(|w| w != repo);
+            let people = if only_flag.is_empty() {
+                room.people()
+            } else {
+                only_flag.to_vec()
+            };
+            source.only.insert(repo.clone(), people);
+        }
+        source.local.push(room.project());
+    }
 }
 
 /// `~/src` → ホームの下の場所
@@ -503,6 +539,32 @@ pub fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rooms_replace_watched_repos_and_show_only_members() {
+        let rooms = room::parse_rooms(
+            r#"[{"id":"1","name":"team","merge_by_author":false,"deploy_by_author":false,"ignore_checks":[],
+              "room_repos":[{"repo":"o/a"}],
+              "room_members":[{"github_id":1,"login":"alice","is_admin":true,"review":true,"merge":true,"deploy":true}]},
+             {"id":"2","name":"empty","merge_by_author":false,"deploy_by_author":false,"ignore_checks":[],
+              "room_repos":[],"room_members":[]}]"#,
+        )
+        .unwrap();
+        let mut source = Source {
+            watch: vec!["o/a".into(), "o/b".into()],
+            only: [("o/a".to_string(), vec!["zed".to_string()])].into(),
+            roots: vec![],
+            local: vec![],
+        };
+        add_rooms(&mut source, &rooms, &[]);
+        assert_eq!(source.watch, vec!["o/b"]);
+        // repo が無い部屋は出さない
+        assert_eq!(source.local.len(), 1);
+        assert_eq!(source.local[0].review, vec!["alice"]);
+        assert_eq!(source.only["o/a"], vec!["alice"]);
+        add_rooms(&mut source, &rooms, &["bob".to_string()]);
+        assert_eq!(source.only["o/a"], vec!["bob"]);
+    }
 
     #[test]
     fn clip_keeps_short_and_cuts_long() {

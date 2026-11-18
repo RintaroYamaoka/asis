@@ -32,6 +32,16 @@ pub struct Local {
     pub only: BTreeMap<String, Vec<String>>,
     /// repo にファイルを置かない場合の、手元だけの定義
     pub projects: Vec<Project>,
+    /// 部屋を置く DB。書かなければ、部屋を使わない
+    pub db: Option<Db>,
+}
+
+/// 部屋を置く DB(Supabase)の場所と、公開用の鍵
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Db {
+    pub url: String,
+    pub key: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -68,6 +78,7 @@ struct RawLocal {
     only: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     project: Vec<RawProject>,
+    db: Option<Db>,
 }
 
 fn check_repo(repo: &str) -> Result<(), String> {
@@ -129,11 +140,22 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
         .map(|p| project(p, None))
         .collect::<Result<_, _>>()?;
     raw.only.keys().try_for_each(|r| check_repo(r))?;
+    let db = raw.db.map(|db| Db {
+        url: db.url.trim_end_matches('/').to_string(),
+        key: db.key,
+    });
+    if db
+        .as_ref()
+        .is_some_and(|db| !db.url.starts_with("https://"))
+    {
+        return Err("[db] の url は https:// で始めてください".into());
+    }
     Ok(Local {
         watch: raw.watch,
         roots: raw.roots,
         only: raw.only,
         projects,
+        db,
     })
 }
 
@@ -348,6 +370,21 @@ deploy = ["me"]
             ("mine", vec!["me".to_string()])
         );
         assert_eq!(parse_local("").unwrap(), Local::default());
+    }
+
+    #[test]
+    fn db_is_optional_and_must_be_https() {
+        assert_eq!(parse_local("watch = []").unwrap().db, None);
+        let l = parse_local("[db]\nurl = \"https://x.example/\"\nkey = \"k\"").unwrap();
+        assert_eq!(
+            l.db,
+            Some(Db {
+                url: "https://x.example".into(),
+                key: "k".into()
+            })
+        );
+        assert!(parse_local("[db]\nurl = \"http://x.example\"\nkey = \"k\"").is_err());
+        assert!(parse_local("[db]\nurl = \"https://x.example\"").is_err());
     }
 
     #[test]
