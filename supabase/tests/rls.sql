@@ -1,9 +1,9 @@
 -- 部屋の権限の試験。期待と違えば例外で止まる。
 \set ON_ERROR_STOP on
 insert into auth.identities values
-  ('00000000-0000-0000-0000-00000000000a', 'github', '101'),  -- alice
-  ('00000000-0000-0000-0000-00000000000b', 'github', '102'),  -- bob
-  ('00000000-0000-0000-0000-00000000000c', 'github', '103');  -- carol(部外者)
+  ('00000000-0000-0000-0000-00000000000a', 'github', '101', '{"user_name":"alice"}'),
+  ('00000000-0000-0000-0000-00000000000b', 'github', '102', '{"user_name":"bob"}'),
+  ('00000000-0000-0000-0000-00000000000c', 'github', '103', '{"user_name":"carol"}');  -- 部外者
 
 create function pg_temp.act(u text) returns void language sql as $$
   select set_config('request.jwt.claim.sub', u, false); $$;
@@ -26,17 +26,17 @@ set role authenticated;
 
 -- ログインしていない人は部屋を作れない
 select pg_temp.act('');
-select pg_temp.fails($$select public.create_room('x','x')$$, '28000');
+select pg_temp.fails($$select public.create_room('x')$$, '28000');
 
 -- 許可の一覧に載っていない人は部屋を作れない。一覧は API の役からは読めも書けもしない
 select pg_temp.act('00000000-0000-0000-0000-00000000000a');
-select pg_temp.fails($$select public.create_room('team','alice')$$, '42501');
+select pg_temp.fails($$select public.create_room('team')$$, '42501');
 select pg_temp.fails($$insert into public.room_creators (github_id) values (101)$$, '42501');
 select pg_temp.fails($$select 1 from public.room_creators$$, '42501');
 reset role; insert into public.room_creators (github_id) values (101); set role authenticated;
 
 -- alice が部屋を作る。本人が管理者で、全部の役を持つ
-insert into pg_temp.ids select public.create_room('team', 'alice');
+insert into pg_temp.ids select public.create_room('team');
 select pg_temp.count_is($$select 1 from public.room_members where login='alice' and is_admin and review and merge and deploy$$, 1);
 
 -- 表に直接 入れて部屋を作ることはできない
@@ -49,7 +49,7 @@ select pg_temp.fails($$insert into public.room_repos select room, 'not a repo' f
 
 -- 招かれた bob には部屋が見える。変えることも、自分の部屋を作ることもできない
 select pg_temp.act('00000000-0000-0000-0000-00000000000b');
-select pg_temp.fails($$select public.create_room('mine','bob')$$, '42501');
+select pg_temp.fails($$select public.create_room('mine')$$, '42501');
 select pg_temp.count_is('select 1 from public.rooms', 1);
 select pg_temp.count_is('select 1 from public.room_repos', 1);
 select pg_temp.count_is('select 1 from public.room_members', 2);
