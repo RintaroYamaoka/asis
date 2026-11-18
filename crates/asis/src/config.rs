@@ -33,6 +33,8 @@ pub struct Local {
     pub projects: Vec<Project>,
     /// 部屋を置く DB。書かなければ、部屋を使わない
     pub db: Option<Db>,
+    /// 画面で使う 1 色(`#rrggbb`)。書かなければ既定の色
+    pub accent: Option<String>,
 }
 
 /// 部屋を置く DB(Supabase)の場所と、公開用の鍵
@@ -78,6 +80,7 @@ struct RawLocal {
     #[serde(default)]
     project: Vec<RawProject>,
     db: Option<Db>,
+    accent: Option<String>,
 }
 
 fn check_repo(repo: &str) -> Result<(), String> {
@@ -144,13 +147,29 @@ pub fn parse_local(text: &str) -> Result<Local, String> {
     {
         return Err("[db] の url は https:// で始めてください".into());
     }
+    if let Some(c) = &raw.accent {
+        if parse_color(c).is_none() {
+            return Err(format!("accent は `#rrggbb` の形で書いてください: `{c}`"));
+        }
+    }
     Ok(Local {
         watch: raw.watch,
         roots: raw.roots,
         only: raw.only,
         projects,
         db,
+        accent: raw.accent,
     })
+}
+
+/// `#rrggbb` を、赤・緑・青の 3 つの数にする。
+pub fn parse_color(text: &str) -> Option<[u8; 3]> {
+    let hex = text.strip_prefix('#')?;
+    if hex.len() != 6 || !hex.is_ascii() {
+        return None;
+    }
+    let part = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([part(0)?, part(2)?, part(4)?])
 }
 
 /// `$XDG_CONFIG_HOME/asis/config.toml`、無ければ `~/.config/asis/config.toml`(Windows は `%APPDATA%`)。
@@ -312,6 +331,23 @@ deploy = ["me"]
             ("mine", vec!["me".to_string()])
         );
         assert_eq!(parse_local("").unwrap(), Local::default());
+    }
+
+    #[test]
+    fn accent_is_an_optional_hex_color() {
+        assert_eq!(parse_local("").unwrap().accent, None);
+        assert_eq!(
+            parse_local("accent = \"#f2b63c\"")
+                .unwrap()
+                .accent
+                .as_deref(),
+            Some("#f2b63c")
+        );
+        assert_eq!(parse_color("#f2b63c"), Some([0xf2, 0xb6, 0x3c]));
+        assert_eq!(parse_color("f2b63c"), None);
+        assert_eq!(parse_color("#f2b63"), None);
+        assert_eq!(parse_color("#zzzzzz"), None);
+        assert!(parse_local("accent = \"orange\"").is_err());
     }
 
     #[test]

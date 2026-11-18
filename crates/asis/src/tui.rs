@@ -430,6 +430,7 @@ mod tests {
         App {
             sections: vec![Section {
                 project: "shop".into(),
+                people: vec![],
                 repos: vec![Ok(sample()), Err("o/x: 権限がありません".into())],
             }],
             filter,

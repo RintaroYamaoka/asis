@@ -48,6 +48,8 @@ pub struct Source {
 /// プロジェクト名と、その repo ごとの結果
 pub struct Section {
     pub project: String,
+    /// 部屋のメンバーと、その役割(確認・取り込み・本番)。部屋でなければ空
+    pub people: Vec<(String, String)>,
     pub repos: Vec<Result<RepoView, String>>,
 }
 
@@ -172,6 +174,25 @@ pub fn default_source(only_flag: &[String]) -> Result<Source, String> {
         }
     }
     Ok(source)
+}
+
+/// 部屋のメンバーと、その役割を言葉にしたもの。役割が無い人は空。
+pub fn people_of(p: &Project) -> Vec<(String, String)> {
+    p.members
+        .iter()
+        .map(|m| {
+            let roles: Vec<&str> = [
+                (&p.review, "確認"),
+                (&p.merge, "取り込み"),
+                (&p.deploy, "本番"),
+            ]
+            .iter()
+            .filter(|(who, _)| who.contains(m))
+            .map(|(_, word)| *word)
+            .collect();
+            (m.clone(), roles.join("・"))
+        })
+        .collect()
 }
 
 /// 部屋を、見るものに足す。部屋の repo は部屋の決まりで見るので、手元の「見る repo」からは外す。
@@ -360,6 +381,7 @@ impl Loader {
             .iter()
             .map(|p| Section {
                 project: p.name.clone(),
+                people: people_of(p),
                 repos: p
                     .repos
                     .iter()
@@ -469,6 +491,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn people_carry_their_roles_in_words() {
+        let p = Project {
+            name: "team".into(),
+            members: vec!["alice".into(), "bob".into()],
+            review: vec!["alice".into()],
+            deploy: vec!["alice".into(), "author".into()],
+            ..Project::default()
+        };
+        assert_eq!(
+            people_of(&p),
+            vec![
+                ("alice".to_string(), "確認・本番".to_string()),
+                ("bob".to_string(), String::new())
+            ]
+        );
+        assert!(people_of(&Project::default()).is_empty());
+    }
+
+    #[test]
     fn rooms_replace_watched_repos_and_show_only_members() {
         let rooms = room::parse_rooms(
             r#"[{"id":"1","name":"team","merge_by_author":false,"deploy_by_author":false,"ignore_checks":[],
@@ -510,6 +551,7 @@ mod tests {
     fn plain_text_lists_groups_and_respects_the_filter() {
         let sections = vec![Section {
             project: "p".into(),
+            people: vec![],
             repos: vec![Ok(view::tests::sample()), Err("x".into())],
         }];
         let all = plain_text(&sections, Filter::All);
