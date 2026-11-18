@@ -109,6 +109,8 @@ struct App {
     /// 操作を GitHub に送っている最中
     busy: bool,
     loading: bool,
+    /// 読み直しの合図の番号。最後に出した合図だけを受ける(合図が増えていかないように)
+    tick: u64,
     synced: Option<Instant>,
     error: Option<String>,
     accent: Color,
@@ -175,7 +177,7 @@ enum Msg {
     WriteBody(String),
     Open(String),
     Refresh,
-    Again,
+    Again(u64),
     Key(keyboard::Event),
 }
 
@@ -228,6 +230,23 @@ fn load(loader: Arc<Mutex<Option<Loader>>>, force: bool) -> Task<Msg> {
     )
 }
 
+/// 少し待ってから、読み直しの合図を出す。
+/// 待つ間は、画面の仕事を回す場所(数に限りがある)を使わず、別に立てた 1 本で寝る。
+fn later(n: u64) -> Task<Msg> {
+    Task::perform(
+        async move {
+            let (tx, rx) = iced::futures::channel::oneshot::channel();
+            std::thread::spawn(move || {
+                std::thread::sleep(EVERY);
+                let _ = tx.send(());
+            });
+            let _ = rx.await;
+            n
+        },
+        Msg::Again,
+    )
+}
+
 fn check_gh() -> Task<Msg> {
     Task::perform(async { asis::github::whoami() }, Msg::GhChecked)
 }
@@ -268,6 +287,7 @@ fn boot() -> (App, Task<Msg>) {
         notice: None,
         busy: false,
         loading: true,
+        tick: 0,
         synced: None,
         error: None,
         accent,
@@ -339,7 +359,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 }
                 Err(e) => app.error = Some(e),
             }
-            return Task::perform(async { std::thread::sleep(EVERY) }, |_| Msg::Again);
+            app.tick += 1;
+            return later(app.tick);
         }
         Msg::GhChecked(gh) => app.gh = Some(gh),
         Msg::CheckGh => {
@@ -499,8 +520,10 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             }
         }
         Msg::AskDelete => app.confirm_delete = true,
-        Msg::Again | Msg::Refresh if app.loading => {}
-        Msg::Again => {
+        // 古い合図は捨てる。読み込み中の合図も捨てる(読み終われば、次の合図が出る)
+        Msg::Again(n) if n != app.tick => {}
+        Msg::Again(_) | Msg::Refresh if app.loading => {}
+        Msg::Again(_) => {
             app.loading = true;
             return load(app.loader.clone(), false);
         }
