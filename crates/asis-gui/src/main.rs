@@ -1039,8 +1039,8 @@ fn pressable<'a>(
     .into()
 }
 
-/// ボードのカードの高さ。全部 同じ大きさにする(PR がまだ無い issue の 1 枚も同じ)
-const CARD_H: f32 = 158.0;
+/// ボードのカードの高さ。全部 同じ大きさにする(PR がまだ無い issue の 1 枚も同じ)。試作と同じ 136
+const CARD_H: f32 = 136.0;
 
 fn card_box<'a>(body: Element<'a, Msg>, line: Color, on: bool, msg: Msg) -> Element<'a, Msg> {
     mouse_area(
@@ -1083,15 +1083,16 @@ fn pr_card<'a>(
             cap(r.age.clone()),
         ]
         .spacing(8),
-        // 題は 3 行ぶんの高さに固定する。カードの形をそろえるため
+        // 題は 2 行ぶんの高さに固定する。カードの形をそろえるため(続きは中身を開いて読む)
         container(
             text(p.title.clone())
                 .size(14)
                 .color(TEXT)
                 .wrapping(text::Wrapping::WordOrGlyph)
         )
-        .height(58)
+        .height(37)
         .clip(true),
+        Space::new().height(Length::Fill),
         chip(p),
         row![
             container(cap(p.author.clone()).wrapping(text::Wrapping::None))
@@ -1123,12 +1124,12 @@ fn todo_card<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> {
             (None, _) if r.stage == Stage::Doing => "Branch pushed · no PR yet".to_string(),
             _ => "No PR yet".to_string(),
         }),
+        Space::new().height(Length::Fill),
         row![
             Space::new().width(Length::Fill),
             turn_of(r, &v.viewer, app.accent)
         ],
-    ]
-    .spacing(14);
+    ];
     card_box(
         body.into(),
         if mine { app.accent } else { FRAME },
@@ -2081,8 +2082,18 @@ fn view(app: &App) -> Element<'_, Msg> {
     }
 }
 
+/// 受けるのは「キーが押された」だけ。
+/// WSL の画面は、ホイールを回すたびに Shift などの押され具合を知らせてくる。それも受けると、
+/// そのたびに画面を全部 組み立て直すことになり、スクロールが重くなる(1 回のホイールで 2 回)。
 fn subscription(_: &App) -> Subscription<Msg> {
-    keyboard::listen().map(Msg::Key)
+    iced::event::listen_with(|event, status, _| match event {
+        iced::Event::Keyboard(e @ keyboard::Event::KeyPressed { .. })
+            if status == iced::event::Status::Ignored =>
+        {
+            Some(Msg::Key(e))
+        }
+        _ => None,
+    })
 }
 
 fn main() -> iced::Result {
