@@ -1,6 +1,7 @@
 //! 画面に出す形。事実を asis-core に渡して、結果を並べるだけ。
 //! 文字の出力も TUI も、ここで作った形を描く。
 use crate::config::Project;
+use crate::extra::FileTask;
 use crate::github::RepoFacts;
 use crate::local::Work;
 use asis_core::facts::*;
@@ -29,6 +30,8 @@ pub struct Group {
 pub enum Kind {
     /// GitHub の issue
     Task,
+    /// repo の中のファイルに書かれたタスク(差し込みの読み口が足したもの。`extra` を参照)
+    Doc,
     /// タスクにつながっていない PR
     Pr,
     /// この PC の上の、まだ PR が無い作業
@@ -206,6 +209,7 @@ pub fn build(
     project: &Project,
     only: &[String],
     works: &[Work],
+    extra: &[FileTask],
     now: i64,
 ) -> RepoView {
     let wanted = |who: &str| only.is_empty() || only.iter().any(|o| o == who);
@@ -312,6 +316,62 @@ pub fn build(
                 task_label(t.state).to_string()
             },
             body: issue.body.clone(),
+            prs: idx.iter().map(|i| line(*i)).collect(),
+            local,
+        });
+    }
+
+    // ファイルに書かれたタスク(差し込み)。issue と同じ規則で、つながる PR の事実から状態を決める。
+    for t in extra {
+        let idx: Vec<usize> = t.prs.iter().copied().filter(|i| *i < f.prs.len()).collect();
+        let vs: Vec<PrVerdict> = idx.iter().map(|i| verdicts[*i].clone()).collect();
+        let is_open = t
+            .open
+            .unwrap_or_else(|| idx.iter().any(|i| f.prs[*i].lifecycle == Lifecycle::Open));
+        let local = local_for(&|b| idx.iter().any(|i| open_branch(*i) == Some(b)));
+        let as_issue = IssueFacts {
+            repo: f.repo.clone(),
+            number: 0,
+            title: t.title.clone(),
+            is_open,
+            author: String::new(),
+            assignees: vec![],
+            body: t.body.clone(),
+        };
+        let v = judge_task(&as_issue, &vs, !local.is_empty());
+        // PR がまだ無いものは誰のものでもないので出す。PR があれば、PR で絞る
+        if !idx.is_empty() && !idx.iter().any(|i| wanted_pr(&f.prs[*i])) {
+            continue;
+        }
+        let Some(g) = ORDER.iter().position(|s| *s == v.state) else {
+            continue;
+        };
+        idx.iter().for_each(|i| claimed[*i] = true);
+        let newest = idx
+            .iter()
+            .map(|i| f.pr_updated[*i].as_str())
+            .max()
+            .unwrap_or("");
+        let file = t.path.rsplit('/').next().unwrap_or("");
+        groups[g].rows.push(Row {
+            kind: Kind::Doc,
+            stage: Stage::of_task(v.state, &vs).unwrap_or(Stage::Todo),
+            number: 0,
+            label: t.label.clone(),
+            title: t.title.clone(),
+            url: if t.path.is_empty() {
+                String::new()
+            } else {
+                format!("https://github.com/{}/blob/HEAD/{}", f.repo, t.path)
+            },
+            turn: v.turn,
+            age: age(newest, now),
+            why: match v.state {
+                TaskState::ShippedOpen if file.is_empty() => "Deployed".to_string(),
+                TaskState::ShippedOpen => format!("Deployed · still open in {file}"),
+                s => task_label(s).to_string(),
+            },
+            body: t.body.clone(),
             prs: idx.iter().map(|i| line(*i)).collect(),
             local,
         });
@@ -506,6 +566,46 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn file_tasks_follow_the_same_rules_as_issues() {
+        let task = |label: &str, open: Option<bool>, prs: &[usize]| FileTask {
+            label: label.into(),
+            title: format!("{label} title"),
+            open,
+            path: if open.is_some() {
+                "docs/計画.md".into()
+            } else {
+                String::new()
+            },
+            body: String::new(),
+            prs: prs.to_vec(),
+        };
+        let extra = [
+            task("S-1", Some(true), &[1]), // 落ちているチェックの PR #21
+            task("C-2", Some(true), &[]),  // PR がまだ無い
+            task("AR-7", None, &[2]),      // 番号だけ。PR は本番に出た
+            task("S-9", Some(false), &[]), // 済んだ
+        ];
+        let project = Project {
+            name: "p".into(),
+            repos: vec!["o/r".into()],
+            ..Project::default()
+        };
+        let v = build(&sample_facts(&[]), &project, &[], &[], &extra, 1795005296);
+        let rows: Vec<&Row> = v.groups.iter().flat_map(|g| &g.rows).collect();
+        let doc = |l: &str| rows.iter().find(|r| r.kind == Kind::Doc && r.label == l);
+        assert_eq!(doc("S-1").map(|r| r.stage), Some(Stage::NeedsFix));
+        assert_eq!(
+            doc("S-1").unwrap().url,
+            "https://github.com/o/r/blob/HEAD/docs/計画.md"
+        );
+        assert_eq!(doc("C-2").map(|r| r.stage), Some(Stage::Todo));
+        // 本番に出た番号だけのタスクと、済んだタスクは出さない
+        assert!(doc("AR-7").is_none() && doc("S-9").is_none());
+        // ファイルのタスクに入った PR は、つながっていない PR の段に出ない
+        assert!(!rows.iter().any(|r| r.kind == Kind::Pr && r.number == 21));
+    }
+
     pub(crate) fn sample() -> RepoView {
         sample_only(&[])
     }
@@ -529,7 +629,14 @@ pub(crate) mod tests {
             repos: vec!["o/r".into()],
             ..Project::default()
         };
-        build(&sample_facts(bodies), &project, &only, works, 1795005296)
+        build(
+            &sample_facts(bodies),
+            &project,
+            &only,
+            works,
+            &[],
+            1795005296,
+        )
     }
 
     fn sample_facts(bodies: &[(u64, &str)]) -> RepoFacts {
@@ -732,7 +839,7 @@ pub(crate) mod tests {
         f.prs[1].checks = Checks::Passing;
         f.prs[1].requested_reviewers = vec!["bob".into()];
         let project = Project::default();
-        let v = build(&f, &project, &["bob".to_string()], &[], 1795005296);
+        let v = build(&f, &project, &["bob".to_string()], &[], &[], 1795005296);
         let labels: Vec<&str> = v
             .groups
             .iter()
@@ -753,7 +860,7 @@ pub(crate) mod tests {
         let mut f = sample_facts(&[]);
         f.people = vec!["ann".into(), "bob".into(), "cat".into(), "dan".into()];
         let turn = |project: &Project| {
-            let v = build(&f, project, &[], &[], 1795005296);
+            let v = build(&f, project, &[], &[], &[], 1795005296);
             v.groups
                 .iter()
                 .flat_map(|g| g.rows.iter())

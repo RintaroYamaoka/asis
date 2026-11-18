@@ -3,6 +3,7 @@
 //! 画面(TUI・GUI)は、ここの `Loader` が返すものを描くだけ。
 pub mod act;
 pub mod config;
+pub mod extra;
 pub mod github;
 pub mod local;
 pub mod room;
@@ -275,6 +276,10 @@ pub struct Loader {
     /// repo の事実。キーは repo と数えないチェックの組。(読んだときの印, 事実か、読めなかった理由)
     facts: HashMap<String, Read<github::RepoFacts>>,
     last_full: Option<Instant>,
+    /// 差し込まれた読み口(repo の中のファイルに書かれたタスク)。無ければ issue と PR だけ
+    reader: Option<std::sync::Arc<dyn extra::Reader>>,
+    /// 差し込みが読んだファイル。キーは repo。(main の commit, ファイルか、読めなかった理由)
+    files: HashMap<String, Read<Vec<(String, String)>>>,
 }
 
 /// 覚えているものを捨てて読み直すか。
@@ -311,7 +316,15 @@ impl Loader {
             source,
             facts: HashMap::new(),
             last_full: None,
+            reader: None,
+            files: HashMap::new(),
         }
+    }
+
+    /// 読み口を差し込む(`extra` を参照)
+    pub fn with_reader(mut self, reader: Option<std::sync::Arc<dyn extra::Reader>>) -> Loader {
+        self.reader = reader;
+        self
     }
 
     /// 見るものを替える。読んだ事実は覚えたままにする(同じ repo は読み直さない)。
@@ -402,6 +415,37 @@ impl Loader {
             .collect();
         drop(wanted);
 
+        // 2b. 差し込みが読むファイル。main が動いた repo だけ読み直す。
+        if let Some(reader) = self.reader.clone() {
+            let stale: Vec<(String, String)> = known
+                .iter()
+                .filter_map(|repo| {
+                    let oid = stamps.get(repo).and_then(|s| extra::main_oid(s))?;
+                    let same = self
+                        .files
+                        .get(repo)
+                        .is_some_and(|(at, f)| *at == oid && f.is_ok());
+                    (!same).then(|| (repo.clone(), oid))
+                })
+                .collect();
+            let read: Vec<Result<Vec<(String, String)>, String>> = std::thread::scope(|s| {
+                let handles: Vec<_> = stale
+                    .iter()
+                    .map(|(repo, oid)| {
+                        let r = reader.clone();
+                        s.spawn(move || extra::fetch_files(repo, oid, &|p| r.wants(p)))
+                    })
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
+                    .collect()
+            });
+            for ((repo, oid), f) in stale.into_iter().zip(read) {
+                self.files.insert(repo, (oid, f));
+            }
+        }
+
         // 3. この PC の上の作業(worktree・ペイン)は、毎回 読む(GitHub には聞かない)。
         let repos: Vec<String> = projects
             .iter()
@@ -432,7 +476,21 @@ impl Loader {
                                     self.source.only.get(repo).map(Vec::as_slice).unwrap_or(&[]);
                                 let mine: Vec<local::Work> =
                                     works.iter().filter(|w| w.repo == *repo).cloned().collect();
-                                Ok(view::build(f, p, only, &mine, now))
+                                // 差し込みの読み口があれば、ファイルに書かれたタスクを足す
+                                let (tasks, note) = match (&self.reader, self.files.get(repo)) {
+                                    (Some(r), Some((_, Ok(files)))) => {
+                                        let titles: Vec<&str> =
+                                            f.prs.iter().map(|p| p.title.as_str()).collect();
+                                        (r.tasks(files, &titles), None)
+                                    }
+                                    (Some(_), Some((_, Err(e)))) => {
+                                        (vec![], Some(format!("docs を読めませんでした: {e}")))
+                                    }
+                                    _ => (vec![], None),
+                                };
+                                let mut v = view::build(f, p, only, &mine, &tasks, now);
+                                v.notes.extend(note);
+                                Ok(v)
                             }
                             Some(Err(e)) => Err(e.clone()),
                             None => Err(stopped()),

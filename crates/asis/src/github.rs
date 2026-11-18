@@ -338,7 +338,7 @@ pub fn stamps(repos: &[String]) -> Result<Vec<String>, String> {
             return Err(format!("`{repo}` に使えない文字があります"));
         }
         query.push_str(&format!(
-            r#"r{i}: repository(owner:"{owner}",name:"{name}"){{pushedAt pullRequests(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} issues(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} deployments(last:1){{nodes{{createdAt latestStatus{{state}}}}}}}}"#
+            r#"r{i}: repository(owner:"{owner}",name:"{name}"){{pushedAt pullRequests(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} issues(first:1,orderBy:{{field:UPDATED_AT,direction:DESC}}){{nodes{{updatedAt}}}} deployments(last:1){{nodes{{createdAt latestStatus{{state}}}}}} defaultBranchRef{{target{{oid}}}}}}"#
         ));
     }
     query.push('}');
