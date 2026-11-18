@@ -24,7 +24,89 @@ pub struct Group {
     pub rows: Vec<Row>,
 }
 
+/// 行が何か
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// GitHub の issue
+    Task,
+    /// タスクにつながっていない PR
+    Pr,
+    /// この PC の上の、まだ PR が無い作業
+    Local,
+}
+
+/// いまどの段階か。タスクにも、タスクにつながっていない PR にも、同じ言葉を使う。
+/// 並びは、人の手が要る順。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Stage {
+    NeedsFix,
+    InReview,
+    ReadyToMerge,
+    Testing,
+    AwaitingShip,
+    ShippedOpen,
+    Doing,
+    Todo,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 8] = [
+        Stage::NeedsFix,
+        Stage::InReview,
+        Stage::ReadyToMerge,
+        Stage::Testing,
+        Stage::AwaitingShip,
+        Stage::ShippedOpen,
+        Stage::Doing,
+        Stage::Todo,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Stage::NeedsFix => "直しが要る",
+            Stage::InReview => "確認待ち",
+            Stage::ReadyToMerge => "取り込める",
+            Stage::Testing => "チェック中",
+            Stage::AwaitingShip => "本番待ち",
+            Stage::ShippedOpen => "閉じ忘れ",
+            Stage::Doing => "実装中",
+            Stage::Todo => "やること",
+        }
+    }
+
+    fn of_task(state: TaskState, prs: &[PrVerdict]) -> Option<Stage> {
+        // つながる PR に直しが要れば、タスクも「直しが要る」。
+        if prs.iter().any(|v| v.state == PrState::NeedsFix) {
+            return Some(Stage::NeedsFix);
+        }
+        Some(match state {
+            TaskState::InReview => Stage::InReview,
+            TaskState::AwaitingShip => Stage::AwaitingShip,
+            TaskState::ShippedOpen => Stage::ShippedOpen,
+            TaskState::Doing => Stage::Doing,
+            TaskState::Todo => Stage::Todo,
+            TaskState::Done => return None,
+        })
+    }
+
+    fn of_pr(state: PrState) -> Option<Stage> {
+        Some(match state {
+            PrState::NeedsFix => Stage::NeedsFix,
+            PrState::InReview => Stage::InReview,
+            PrState::ReadyToMerge => Stage::ReadyToMerge,
+            PrState::Testing => Stage::Testing,
+            PrState::Merged => Stage::AwaitingShip,
+            PrState::Draft => Stage::Doing,
+            PrState::Shipped | PrState::Withdrawn => return None,
+        })
+    }
+}
+
 pub struct Row {
+    pub kind: Kind,
+    pub stage: Stage,
+    /// issue か PR の番号。手元の作業は 0
+    pub number: u64,
     /// `#12`(タスク)か `?#34`(タスクにつながっていない PR)
     pub label: String,
     pub title: String,
@@ -201,6 +283,9 @@ pub fn build(
             .max()
             .unwrap_or("");
         groups[g].rows.push(Row {
+            kind: Kind::Task,
+            stage: Stage::of_task(t.state, &vs).unwrap_or(Stage::Todo),
+            number: issue.number,
             label: format!("#{}", issue.number),
             title: issue.title.clone(),
             url: format!("https://github.com/{}/issues/{}", f.repo, issue.number),
@@ -230,6 +315,9 @@ pub fn build(
             continue;
         }
         loose.push(Row {
+            kind: Kind::Pr,
+            stage: Stage::of_pr(v.state).unwrap_or(Stage::Doing),
+            number: p.number,
             label: format!("{}#{}", mark(v.state), p.number),
             title: p.title.clone(),
             url: format!("https://github.com/{}/pull/{}", f.repo, p.number),
@@ -252,6 +340,9 @@ pub fn build(
         }
         let l = local_line(w);
         fresh.push(Row {
+            kind: Kind::Local,
+            stage: Stage::Doing,
+            number: 0,
             label: "手元".into(),
             title: w.branch.clone(),
             url: String::new(),
@@ -524,6 +615,25 @@ pub(crate) mod tests {
             vec!["!#21", "…#23"]
         );
         assert_eq!(loose[0].why, "チェックが落ちている(lint)");
+        // タスクにも PR にも、同じ段階の言葉が付く
+        assert_eq!(
+            loose
+                .iter()
+                .map(|r| (r.kind, r.stage, r.number))
+                .collect::<Vec<_>>(),
+            vec![
+                (Kind::Pr, Stage::NeedsFix, 21),
+                (Kind::Pr, Stage::Doing, 23)
+            ]
+        );
+        let review = &rows(&v, "確認待ち")[0];
+        assert_eq!(
+            (review.kind, review.stage, review.number),
+            (Kind::Task, Stage::InReview, 7)
+        );
+        assert_eq!(rows(&v, "やること")[0].stage, Stage::Todo);
+        assert!(Stage::ALL.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(Stage::NeedsFix.label(), "直しが要る");
         assert_eq!(loose[0].url, "https://github.com/o/r/pull/21");
         assert!(v.notes.is_empty());
     }
