@@ -440,8 +440,25 @@ impl Client {
         )
     }
 
+    /// 入っている部屋。メンバーの名前は、GitHub の今の名前に直して返す。
+    /// GitHub で名前を変えた人は、DB に残っている前の名前のままだと、役割がその人に付かなくなる。
+    /// 人は番号で決まるので、番号から今の名前を聞き、違っていれば読み替える(DB も、直せる人なら直す)
     pub fn rooms(&self) -> Result<Vec<Room>, String> {
-        parse_rooms(&self.send("GET", ROOMS, None)?)
+        let mut rooms = parse_rooms(&self.send("GET", ROOMS, None)?)?;
+        let ids: Vec<i64> = rooms
+            .iter()
+            .flat_map(|r| r.members.iter().map(|m| m.github_id))
+            .collect();
+        for (room, github_id, login) in rename(&mut rooms, &current_logins(&ids)) {
+            // 直せるのは管理者だけ。直せなくても、画面は今の名前で出る
+            let _ = self.changed(
+                "PATCH",
+                &format!("/rest/v1/room_members?room_id=eq.{room}&github_id=eq.{github_id}"),
+                Some(&serde_json::json!({ "login": login }).to_string()),
+                "",
+            );
+        }
+        Ok(rooms)
     }
 
     /// 足すか、すでにあれば書き換える
@@ -757,6 +774,48 @@ pub fn sign_out() -> Result<bool, String> {
     }
 }
 
+/// メンバーの名前を、今の名前に読み替える。変わったもの(部屋・番号・今の名前)を返す
+fn rename(
+    rooms: &mut [Room],
+    current: &std::collections::HashMap<i64, String>,
+) -> Vec<(String, i64, String)> {
+    let mut changed = Vec::new();
+    for room in rooms {
+        for m in &mut room.members {
+            if let Some(now) = current.get(&m.github_id).filter(|now| **now != m.login) {
+                m.login = now.clone();
+                changed.push((room.id.clone(), m.github_id, now.clone()));
+            }
+        }
+    }
+    changed
+}
+
+/// GitHub の番号から、今のアカウント名を聞く。`gh` のログインを借りる。
+/// 1 回 聞いた番号は、開いているあいだ覚えておく(読み直しのたびに GitHub に聞かない)。
+/// 聞けなかった番号は入れない(DB の名前のまま使う)
+fn current_logins(ids: &[i64]) -> std::collections::HashMap<i64, String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static KNOWN: OnceLock<Mutex<HashMap<i64, Option<String>>>> = OnceLock::new();
+    let Ok(mut known) = KNOWN.get_or_init(Default::default).lock() else {
+        return HashMap::new();
+    };
+    for id in ids {
+        known.entry(*id).or_insert_with(|| {
+            let out = std::process::Command::new("gh")
+                .args(["api", &format!("user/{id}"), "-q", ".login"])
+                .output()
+                .ok()?;
+            let login = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            (out.status.success() && !login.is_empty()).then_some(login)
+        });
+    }
+    ids.iter()
+        .filter_map(|id| Some((*id, known.get(id)?.clone()?)))
+        .collect()
+}
+
 /// GitHub のアカウント名から、番号と正しい大文字小文字の名前を聞く。`gh` のログインを借りる。
 fn github_user(login: &str) -> Result<(i64, String), String> {
     if !login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') || login.is_empty() {
@@ -994,6 +1053,29 @@ mod tests {
             p.room.as_deref(),
             Some("11111111-1111-1111-1111-111111111111")
         );
+    }
+
+    #[test]
+    fn a_renamed_member_keeps_their_roles() {
+        let mut rooms = parse_rooms(SAMPLE).unwrap();
+        // 1 番の人が GitHub で Alice → alice2 に変えた。2 番は聞けなかった
+        let current = std::collections::HashMap::from([(1, "alice2".to_string())]);
+        let changed = rename(&mut rooms, &current);
+        assert_eq!(
+            changed,
+            vec![(
+                "11111111-1111-1111-1111-111111111111".to_string(),
+                1,
+                "alice2".to_string()
+            )]
+        );
+        let p = rooms[0].project();
+        assert_eq!(p.review, vec!["alice2"]);
+        assert!(
+            p.members.contains(&"alice2".to_string()) && p.members.contains(&"bob".to_string())
+        );
+        // 同じ名前なら何も変えない
+        assert!(rename(&mut rooms, &current).is_empty());
     }
 
     #[test]
