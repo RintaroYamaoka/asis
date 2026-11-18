@@ -20,7 +20,6 @@ const HELP: &str = "asis — development, as is
   asis <owner/repo>...     その repo を開く
   asis add <owner/repo>    見る repo に足す(--only を付けると、その人の分だけ出す)
   asis remove <owner/repo> 見る repo から外す
-  asis init                repo に置く定義ファイル(.asis.toml)のひな形を出す
   asis login               GitHub でログインする(部屋を使うとき)
   asis room                部屋(repo・メンバー・役割をまとめたもの)。`asis room help` で一覧
 
@@ -28,8 +27,8 @@ const HELP: &str = "asis — development, as is
   --mine                   自分の番のものだけ出す
   --only <名前,名前>       その人たちが出した PR と、その人たちのタスクだけ出す
 
-プロジェクトの定義(まとめる repo・役割・数えないチェック)は、repo の中の .asis.toml に置きます。
-その repo を見られる人は、同じ定義を読みます。置かなければ、その repo 1 つを既定の決まりで見ます。
+repo・メンバー・役割をまとめて人と共有するときは、部屋を使います。
+部屋が無くても、ログインしなくても、その repo 1 つを既定の決まりで見られます。
 
 GitHub の公式コマンド gh のログインを使います。読んだものは保存しません。";
 
@@ -91,28 +90,21 @@ fn run() -> Result<(), String> {
             _ => repos.push(a),
         }
     }
-    match repos.first().map(String::as_str) {
-        Some("init") => {
-            print!("{}", config::TEMPLATE);
-            return Ok(());
+    if let Some(cmd @ ("add" | "remove")) = repos.first().map(String::as_str) {
+        let [_, repo] = repos.as_slice() else {
+            return Err(format!("asis {cmd} <owner/repo> の形で指定してください"));
+        };
+        let local = config::edit_watch(repo, cmd == "add", &only)?;
+        if local.watch.is_empty() {
+            println!("見る repo はありません");
         }
-        Some(cmd @ ("add" | "remove")) => {
-            let [_, repo] = repos.as_slice() else {
-                return Err(format!("asis {cmd} <owner/repo> の形で指定してください"));
-            };
-            let local = config::edit_watch(repo, cmd == "add", &only)?;
-            if local.watch.is_empty() {
-                println!("見る repo はありません");
+        for r in &local.watch {
+            match local.only.get(r) {
+                Some(people) => println!("{r}  ({} の分だけ)", people.join("・")),
+                None => println!("{r}"),
             }
-            for r in &local.watch {
-                match local.only.get(r) {
-                    Some(people) => println!("{r}  ({} の分だけ)", people.join("・")),
-                    None => println!("{r}"),
-                }
-            }
-            return Ok(());
         }
-        _ => {}
+        return Ok(());
     }
     let only_flag = only.clone();
     let source = if repos.is_empty() {
@@ -209,15 +201,6 @@ fn expand_home(path: &str) -> std::path::PathBuf {
     }
 }
 
-/// 見る repo の定義を読む。定義ファイルが無ければ、その repo 1 つを既定の決まりで見る。
-fn resolve(repo: &str) -> Result<Project, String> {
-    match github::project_file(repo)? {
-        Some(text) => config::parse_repo_file(&text, repo)
-            .map_err(|e| format!("{repo} の {}: {e}", config::REPO_FILE)),
-        None => Ok(config::single(repo)),
-    }
-}
-
 /// 何分かに 1 回は、変わったかどうかに関係なく全部 読み直す(取りこぼしに備える)。
 const FULL_EVERY: Duration = Duration::from_secs(600);
 
@@ -229,8 +212,6 @@ type Read<T> = (String, Result<T, String>);
 /// 毎回 全部は読まない。変わったかどうかは、全部の repo を 1 回の軽い問い合わせで聞く。
 pub struct Loader {
     source: Source,
-    /// 見る repo の定義。(読んだときの印, 定義か、読めなかった理由)
-    definitions: HashMap<String, Read<Project>>,
     /// repo の事実。キーは repo と数えないチェックの組。(読んだときの印, 事実か、読めなかった理由)
     facts: HashMap<String, Read<github::RepoFacts>>,
     last_full: Option<Instant>,
@@ -268,7 +249,6 @@ impl Loader {
     pub fn new(source: Source) -> Loader {
         Loader {
             source,
-            definitions: HashMap::new(),
             facts: HashMap::new(),
             last_full: None,
         }
@@ -286,16 +266,18 @@ impl Loader {
             self.last_full = Some(Instant::now());
         }
 
-        // 0. 知っている repo の全部について、変わったかどうかの印を 1 回で聞く。
-        let mut known: Vec<String> = self.source.watch.clone();
-        let cached_projects = self
-            .definitions
-            .values()
-            .filter_map(|(_, p)| p.as_ref().ok());
-        for repo in cached_projects
-            .chain(self.source.local.iter())
-            .flat_map(|p| p.repos.iter())
-        {
+        // 1. 見るもの。その場で指定した repo は、その repo 1 つを既定の決まりで見る。部屋と手元の定義は、その決まりで見る。
+        let singles: Vec<Project> = self
+            .source
+            .watch
+            .iter()
+            .map(|r| config::single(r))
+            .collect();
+        let projects: Vec<&Project> = singles.iter().chain(self.source.local.iter()).collect();
+
+        // 変わったかどうかの印を、全部の repo について 1 回で聞く。
+        let mut known: Vec<String> = Vec::new();
+        for repo in projects.iter().flat_map(|p| p.repos.iter()) {
             if !known.contains(repo) {
                 known.push(repo.clone());
             }
@@ -304,56 +286,9 @@ impl Loader {
             .map(|s| known.iter().cloned().zip(s).collect())
             .unwrap_or_default();
 
-        // 1. 見る repo の定義。変わったものだけ同時に読む。
-        let stale: Vec<&String> = self
-            .source
-            .watch
-            .iter()
-            .filter(|r| {
-                let cached = self
-                    .definitions
-                    .get(*r)
-                    .map(|(stamp, p)| (stamp.as_str(), p.is_ok(), false));
-                needs_fetch(force, cached, stamps.get(*r).map(String::as_str))
-            })
-            .collect();
-        let definitions_read = stale.len();
-        let resolved: Vec<Result<Project, String>> = std::thread::scope(|s| {
-            let handles: Vec<_> = stale.iter().map(|r| s.spawn(move || resolve(r))).collect();
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap_or_else(|_| Err(stopped())))
-                .collect()
-        });
-        for (repo, project) in stale
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .zip(resolved)
-        {
-            self.definitions.insert(
-                repo.clone(),
-                (stamps.get(&repo).cloned().unwrap_or_default(), project),
-            );
-        }
-        // 定義を読めなかった repo は、その名前で理由を出す。
-        let projects: Vec<(&str, Result<&Project, String>)> = self
-            .source
-            .watch
-            .iter()
-            .map(|repo| {
-                (
-                    repo.as_str(),
-                    self.definitions[repo].1.as_ref().map_err(String::clone),
-                )
-            })
-            .chain(self.source.local.iter().map(|p| (p.name.as_str(), Ok(p))))
-            .collect();
-
         // 2. repo の事実。変わったものだけ同時に読む。
         let mut wanted: Vec<(String, &str, &[String])> = Vec::new();
-        for p in projects.iter().filter_map(|(_, p)| p.as_ref().ok()) {
+        for p in &projects {
             for repo in &p.repos {
                 let key = facts_key(repo, &p.ignore_checks);
                 let cached = self.facts.get(&key).map(|(stamp, f)| {
@@ -371,10 +306,9 @@ impl Loader {
             }
         }
         log(&format!(
-            "load force={force} known={} stamps={} definitions_read={} facts_read=[{}]",
+            "load force={force} known={} stamps={} facts_read=[{}]",
             known.len(),
             stamps.len(),
-            definitions_read,
             wanted
                 .iter()
                 .map(|(_, repo, _)| *repo)
@@ -406,7 +340,6 @@ impl Loader {
         // 3. この PC の上の作業(worktree・ペイン)は、毎回 読む(GitHub には聞かない)。
         let repos: Vec<String> = projects
             .iter()
-            .filter_map(|(_, p)| p.as_ref().ok())
             .flat_map(|p| p.repos.iter().cloned())
             .collect();
         let works = local::gather(&repos, &self.source.roots);
@@ -420,35 +353,25 @@ impl Loader {
             .collect();
         let sections = projects
             .iter()
-            .map(|(label, p)| match p {
-                Ok(p) => Section {
-                    project: p.name.clone(),
-                    repos: p
-                        .repos
-                        .iter()
-                        .map(
-                            |repo| match facts.get(facts_key(repo, &p.ignore_checks).as_str()) {
-                                Some(Ok(f)) => {
-                                    let only = self
-                                        .source
-                                        .only
-                                        .get(repo)
-                                        .map(Vec::as_slice)
-                                        .unwrap_or(&[]);
-                                    let mine: Vec<local::Work> =
-                                        works.iter().filter(|w| w.repo == *repo).cloned().collect();
-                                    Ok(view::build(f, p, only, &mine, now))
-                                }
-                                Some(Err(e)) => Err(e.clone()),
-                                None => Err(stopped()),
-                            },
-                        )
-                        .collect(),
-                },
-                Err(e) => Section {
-                    project: label.to_string(),
-                    repos: vec![Err(e.clone())],
-                },
+            .map(|p| Section {
+                project: p.name.clone(),
+                repos: p
+                    .repos
+                    .iter()
+                    .map(
+                        |repo| match facts.get(facts_key(repo, &p.ignore_checks).as_str()) {
+                            Some(Ok(f)) => {
+                                let only =
+                                    self.source.only.get(repo).map(Vec::as_slice).unwrap_or(&[]);
+                                let mine: Vec<local::Work> =
+                                    works.iter().filter(|w| w.repo == *repo).cloned().collect();
+                                Ok(view::build(f, p, only, &mine, now))
+                            }
+                            Some(Err(e)) => Err(e.clone()),
+                            None => Err(stopped()),
+                        },
+                    )
+                    .collect(),
             })
             .collect();
         drop(facts);

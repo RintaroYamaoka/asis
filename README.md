@@ -6,7 +6,8 @@ development, as is — 開発を、あるがままに見える化する。
 
 - 状態は誰も動かさない。事実だけで動く
 - issue が無い PR も、そのまま見える
-- サーバーも DB も持たない。あなたの PC の上で、あなたの権限で GitHub を読む
+- コードも PR も預からない。あなたの PC の上で、あなたの権限で GitHub を読む
+- repo には何も置かない。ログインしなくても、1 人ですぐ使える
 
 設計は [docs/design.md](docs/design.md)。
 
@@ -22,20 +23,32 @@ asis add <owner/repo> --only alice,bob   # その repo では、その人たち�
 asis --plain                  # 画面を開かず、文字で出す
 ```
 
-## プロジェクトの定義
+## 部屋
 
-まとめる repo・役割・数えないチェックは、repo の中の `.asis.toml` に置く。その repo を見られる人は、同じ定義を読む。ひな形は `asis init` で出る。置かなければ、その repo 1 つを既定の決まりで見る。
+repo・メンバー・役割を人と共有するときは、部屋を使う。部屋は DB(Supabase)に置く。DB に入るのは部屋の定義だけで、issue・PR・コードは入らない。
+
+```
+asis login                                  # GitHub でログインする(本人確認だけ。repo を読む許可は求めない)
+asis room new team                          # 部屋を作る。作った人が管理者
+asis room add team owner/api                # repo を足す
+asis room invite team alice --review        # GitHub のアカウント名で招く。役割: --review --merge --deploy --admin
+asis room ignore team Preview               # 状態を決めるときに数えないチェック
+asis room                                   # 入っている部屋を出す
+```
+
+- 部屋に入っても、GitHub で見られない repo は見えない。見る権限を決めるのは GitHub だけ
+- 部屋のメンバーが、その部屋で出す人になる
+- 役割を決めなければ、確認は作者以外のメンバー、取り込みと本番は作者
+
+既定のつなぎ先は無い。部屋を使うには、自分の Supabase を用意して、手元の設定(`~/.config/asis/config.toml`)に場所を書く。
 
 ```toml
-name = "shop"
-repos = ["owner/api"]            # この repo と一緒に見る repo
-ignore_checks = ["Preview"]      # 状態を決めるときに数えないチェック
-
-[roles]                          # GitHub のアカウント名か "author"(PR を出した本人)
-review = ["alice"]               # 確認する人
-merge = ["alice"]                # 承認のあと取り込む人(省くと作者)
-deploy = ["alice"]               # 本番に出す人(省くと作者)
+[db]
+url = "https://xxxx.supabase.co"
+key = "公開用の鍵(publishable / anon)"
 ```
+
+用意のしかた:[supabase/migrations](supabase/migrations) の SQL を順に流す。Authentication で GitHub のログインを有効にし(GitHub に OAuth App を登録する)、Redirect URLs に `http://127.0.0.1:53682/callback` を足す。部屋を作ってよい人の GitHub の番号を、表 `room_creators` に入れる。
 
 ## AI に渡す決まり
 
@@ -53,13 +66,9 @@ clone の置き場は、ペインが開いている場所と今の場所から�
 roots = ["~/src"]   # 直下にある、見ている repo の clone と、その worktree を読む
 ```
 
-## メンバー
-
-メンバーを招待する機能は無い。GitHub で repo の権限を渡し、相手が `asis add owner/repo` と打てば、同じ画面が出る。
-
 ## 状態
 
-作り始めたところ。今あるのは、状態と番を決める規則と、ターミナルの画面(TUI)。手元の作業の表示と GUI はこれから。
+作り始めたところ。今あるのは、状態と番を決める規則、部屋、ターミナルの画面(TUI)。GUI はこれから。
 
 ## 開発
 

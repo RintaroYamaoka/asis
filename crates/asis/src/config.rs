@@ -1,13 +1,10 @@
-//! プロジェクトの定義と、手元の設定。
+//! 手元の設定。
 //!
-//! プロジェクトの定義(まとめる repo・役割・数えないチェック)は、repo の中の `.asis.toml` に置く。
-//! 置いた repo を見られる人は、同じ定義を読む。手元の設定には「どの repo を見るか」だけを持つ。
+//! どの repo を見るか・手元の clone の場所・部屋を置く DB の場所を持つ。
+//! 人と共有する定義(repo・メンバー・役割)は、ここではなく部屋に置く。
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-
-/// repo の中に置く定義ファイルの名前
-pub const REPO_FILE: &str = ".asis.toml";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Project {
@@ -24,7 +21,7 @@ pub struct Project {
 /// 手元の設定
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Local {
-    /// 見る repo。定義はその repo の `.asis.toml`
+    /// 見る repo。その repo 1 つを、既定の決まりで見る
     pub watch: Vec<String>,
     /// 手元の clone を探すフォルダ。直下にある、見ている repo の clone と、その worktree を読む
     pub roots: Vec<String>,
@@ -116,13 +113,7 @@ fn project(raw: RawProject, home: Option<&str>) -> Result<Project, String> {
     })
 }
 
-/// repo の中の `.asis.toml`。`home` はそれを置いた repo。
-pub fn parse_repo_file(text: &str, home: &str) -> Result<Project, String> {
-    let raw: RawProject = toml::from_str(text).map_err(|e| e.to_string())?;
-    project(raw, Some(home))
-}
-
-/// 定義ファイルが無い repo。その repo 1 つを、既定の決まりで見る。
+/// その場で指定した repo。その repo 1 つを、既定の決まりで見る。
 pub fn single(repo: &str) -> Project {
     Project {
         name: repo.to_string(),
@@ -290,61 +281,9 @@ pub fn edit_watch(repo: &str, add: bool, only: &[String]) -> Result<Local, Strin
     Ok(local)
 }
 
-/// repo に置く定義ファイルのひな形
-pub const TEMPLATE: &str = r#"# asis のプロジェクトの定義。この repo を見られる人は、同じ定義を読みます。
-
-# 画面に出す名前(省くと repo の名前)
-# name = "shop"
-
-# この repo と一緒に 1 つのプロジェクトとして見る repo
-# repos = ["owner/api"]
-
-# 状態を決めるときに数えないチェックの名前(落ちていても取り込みを止めないもの)
-# ignore_checks = ["Preview"]
-
-# 役割。GitHub のアカウント名か "author"(その PR を出した本人)。
-# 省くと、確認は作者以外のメンバー、取り込みと本番は作者。
-# [roles]
-# review = ["alice"]
-# merge = ["alice"]
-# deploy = ["alice"]
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn repo_file_includes_its_home_and_reads_roles() {
-        let p = parse_repo_file(
-            r#"
-name = "shop"
-repos = ["o/api", "o/front"]
-ignore_checks = ["Preview"]
-[roles]
-review = ["alice"]
-merge = ["author"]
-"#,
-            "o/front",
-        )
-        .unwrap();
-        assert_eq!(p.name, "shop");
-        assert_eq!(p.repos, vec!["o/front", "o/api"]);
-        assert_eq!(
-            (p.review, p.merge, p.deploy.len()),
-            (vec!["alice".to_string()], vec!["author".to_string()], 0)
-        );
-        assert_eq!(p.ignore_checks, vec!["Preview"]);
-    }
-
-    #[test]
-    fn empty_repo_file_and_missing_file_mean_defaults() {
-        let p = parse_repo_file("", "o/r").unwrap();
-        assert_eq!(p, single("o/r"));
-        assert_eq!((p.name.as_str(), p.repos.len()), ("o/r", 1));
-        // ひな形は、そのまま置いても既定と同じ
-        assert_eq!(parse_repo_file(TEMPLATE, "o/r").unwrap(), single("o/r"));
-    }
 
     #[test]
     fn local_config_has_watch_and_local_projects() {
@@ -429,9 +368,12 @@ deploy = ["me"]
         assert!(parse_local("watch = [\"nope\"]")
             .unwrap_err()
             .contains("owner/name"));
-        assert!(parse_repo_file("repos = [\"a/b/c\"]", "o/r").is_err());
-        assert!(parse_repo_file("typo = 1", "o/r").is_err());
-        assert!(parse_repo_file("[roles]\nboss = [\"x\"]", "o/r").is_err());
+        assert!(parse_local("[[project]]\nname = \"x\"\nrepos = [\"a/b/c\"]").is_err());
+        assert!(parse_local("typo = 1").is_err());
+        assert!(parse_local(
+            "[[project]]\nname = \"x\"\nrepos = [\"o/r\"]\n[project.roles]\nboss = [\"x\"]"
+        )
+        .is_err());
     }
 
     #[test]
