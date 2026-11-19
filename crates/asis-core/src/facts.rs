@@ -93,6 +93,10 @@ pub const AUTHOR: &str = "author";
 pub struct Settings {
     /// その repo で動いている人
     pub members: Vec<String>,
+    /// 計画する人(issue を書く・終わったものを閉じる)。空なら、誰の番にもしない
+    pub plan: Vec<String>,
+    /// 実装する人。空なら、誰の番にもしない
+    pub implement: Vec<String>,
     /// 確認する人。空なら、作者以外のメンバー
     pub review: Vec<String>,
     /// 承認のあと取り込む人。空なら作者

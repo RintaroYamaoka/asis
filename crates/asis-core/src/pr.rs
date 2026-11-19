@@ -166,6 +166,8 @@ pub(crate) mod tests {
     pub(crate) fn team() -> Settings {
         Settings {
             members: vec!["ann".into(), "bob".into()],
+            plan: vec![],
+            implement: vec![],
             review: vec![],
             merge: vec!["bob".into()],
             deploy: vec!["bob".into()],

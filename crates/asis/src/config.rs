@@ -13,6 +13,8 @@ pub struct Project {
     /// 部屋のメンバー。確認する人が決まらないときに回す先。空なら、GitHub でその repo に書ける人
     pub members: Vec<String>,
     /// 役割。GitHub のアカウント名か `author` の一覧。空なら既定(asis-core の Settings を参照)
+    pub plan: Vec<String>,
+    pub implement: Vec<String>,
     pub review: Vec<String>,
     pub merge: Vec<String>,
     pub deploy: Vec<String>,
@@ -52,6 +54,10 @@ pub struct Db {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct Roles {
+    #[serde(default)]
+    plan: Vec<String>,
+    #[serde(default)]
+    implement: Vec<String>,
     #[serde(default)]
     review: Vec<String>,
     #[serde(default)]
@@ -120,6 +126,8 @@ fn project(raw: RawProject, home: Option<&str>) -> Result<Project, String> {
         name,
         repos,
         members: Vec::new(),
+        plan: raw.roles.plan,
+        implement: raw.roles.implement,
         review: raw.roles.review,
         merge: raw.roles.merge,
         deploy: raw.roles.deploy,
