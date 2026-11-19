@@ -797,18 +797,63 @@ pub fn local_work(app: &App) -> Element<'_, Msg> {
     .into()
 }
 
-pub fn about(_: &App) -> Element<'_, Msg> {
+pub fn about(app: &App) -> Element<'_, Msg> {
+    // 新しい版の今の様子と、今すぐ確かめるボタン
+    let state = match update_outcome() {
+        _ if app.checking => app.t("確かめています…", "Checking…").to_string(),
+        Some(asis::update::Outcome::Ready(v)) => {
+            if app.english {
+                format!("Version {v} is installed. It starts the next time you open AsIs.")
+            } else {
+                format!("版 {v} を入れました。次に AsIs を開くと、その版で動きます。")
+            }
+        }
+        Some(asis::update::Outcome::Available(v)) => {
+            if app.english {
+                format!("Version {v} is out. It is rebuilt from source.")
+            } else {
+                format!("版 {v} が出ています。ソースから作り直します。")
+            }
+        }
+        Some(asis::update::Outcome::Blocked(e)) => e,
+        Some(asis::update::Outcome::Nothing) => app
+            .t("いちばん新しい版です", "This is the newest version")
+            .to_string(),
+        None => app.t("まだ確かめていません", "Not checked yet").to_string(),
+    };
+    let updates: Element<'_, Msg> = if updates_itself() {
+        row![
+            label("Updates", &state),
+            seg_opt(
+                "Check for updates",
+                (!app.checking).then_some(Msg::CheckUpdate)
+            ),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        label(
+            "Updates",
+            app.t(
+                "この版は、自分では入れ替わりません(自分でビルドして入れ直します)",
+                "This build does not update itself (rebuild and reinstall it)",
+            ),
+        )
+    };
     column![
         h4("About"),
-        sect(
+        sect(lines(vec![
             row![
                 label("AsIs", "development, as is · MIT"),
-                text(version()).size(14).color(DIM),
+                text(format!("Version {}", version())).size(14).color(TEXT),
             ]
             .spacing(10)
             .align_y(Alignment::Center)
-            .into()
-        ),
+            .into(),
+            updates,
+        ])),
+        notice_line(app),
     ]
     .spacing(14)
     .into()

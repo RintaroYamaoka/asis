@@ -12,6 +12,7 @@ query($owner:String!,$name:String!){
     nameWithOwner
     open: pullRequests(states:OPEN, first:100, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
       number title body isDraft state mergeable baseRefName headRefName createdAt updatedAt mergedAt
+      additions deletions changedFiles
       author{login __typename} reviewDecision
       reviewRequests(first:10){nodes{requestedReviewer{... on User{login}}}}
       commits(last:1){nodes{commit{committedDate statusCheckRollup{contexts(first:50){nodes{
@@ -30,6 +31,7 @@ query($owner:String!,$name:String!){
   repository(owner:$owner,name:$name){
     merged: pullRequests(states:MERGED, first:40, orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
       number title body state baseRefName headRefName createdAt updatedAt mergedAt author{login __typename}
+      additions deletions changedFiles
       mergeCommit{oid}
       closingIssuesReferences(first:10){nodes{number repository{nameWithOwner}}}
     }}
@@ -51,6 +53,8 @@ pub struct RepoFacts {
     pub pr_updated: Vec<String>,
     /// PR ごとの、落ちているチェックの名前。prs と同じ順
     pub pr_failing: Vec<Vec<String>>,
+    /// PR ごとの大きさ(足した行・消した行・変えたファイルの数)。prs と同じ順
+    pub pr_size: Vec<(u64, u64, u64)>,
     pub issues: Vec<IssueFacts>,
     pub branches: Vec<String>,
     /// 本番デプロイの記録が 1 件も無い
@@ -247,6 +251,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
     let mut prs = Vec::new();
     let mut pr_updated = Vec::new();
     let mut pr_failing = Vec::new();
+    let mut pr_size = Vec::new();
     let mut people = Vec::new();
     for p in nodes(&r["open"]).chain(nodes(&r["merged"])) {
         let author = s(&p["author"]["login"]);
@@ -320,6 +325,8 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
         });
         pr_updated.push(s(&p["updatedAt"]));
         pr_failing.push(failing);
+        let n = |key: &str| p[key].as_u64().unwrap_or(0);
+        pr_size.push((n("additions"), n("deletions"), n("changedFiles")));
     }
 
     let issues = nodes(&r["openIssues"])
@@ -365,6 +372,7 @@ pub fn parse(v: &Value, ignore_checks: &[String]) -> Option<RepoFacts> {
         prs,
         pr_updated,
         pr_failing,
+        pr_size,
         issues,
         branches: nodes(&r["refs"]).map(|n| s(&n["name"])).collect(),
         no_deployments: production.is_empty(),
