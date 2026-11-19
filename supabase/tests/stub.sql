@@ -7,3 +7,10 @@ create function auth.uid() returns uuid language sql stable as $$
 $$;
 grant usage on schema auth to authenticated, anon;
 grant usage on schema public to authenticated, anon;
+-- ファイルの置き場(storage)の最小の代わり
+create schema storage;
+create table storage.buckets (id text primary key, name text, public boolean);
+create table storage.objects (bucket_id text, name text);
+alter table storage.objects enable row level security;
+grant usage on schema storage to authenticated, anon;
+grant select, insert, update, delete on storage.objects to authenticated;

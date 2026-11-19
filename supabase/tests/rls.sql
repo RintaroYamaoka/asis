@@ -78,6 +78,35 @@ reset role; set role anon;
 select pg_temp.fails('select 1 from public.rooms', '42501');
 reset role; set role authenticated;
 
+-- 配るアプリの版。書けるのは DB を動かしている人だけ。読めるのは、どこかの部屋に入っている人だけ
+reset role;
+insert into public.app_releases (app, version, min_version, files) values ('demo', '0.2.0', '0.1.0', '[]');
+insert into storage.objects (bucket_id, name) values ('releases', 'demo/0.2.0/a.exe'), ('other', 'x');
+select pg_temp.count_is($$select 1 from storage.buckets where id = 'releases' and not public$$, 1);
+set role authenticated;
+select pg_temp.act('00000000-0000-0000-0000-00000000000a');  -- メンバー
+select pg_temp.count_is('select 1 from public.app_releases', 1);
+select pg_temp.count_is($$select 1 from storage.objects where bucket_id = 'releases'$$, 1);
+select pg_temp.count_is($$select 1 from storage.objects where bucket_id = 'other'$$, 0);
+select pg_temp.fails($$insert into public.app_releases (app, version, min_version, files) values ('demo', '9.9.9', '9.9.9', '[]')$$, '42501');
+select pg_temp.fails($$update public.app_releases set version = '9.9.9'$$, '42501');
+select pg_temp.fails($$delete from public.app_releases$$, '42501');
+select pg_temp.fails($$insert into storage.objects (bucket_id, name) values ('releases', 'demo/9.9.9/a.exe')$$, '42501');
+update storage.objects set name = 'evil' where bucket_id = 'releases';
+delete from storage.objects where bucket_id = 'releases';
+select pg_temp.fails($$select 1 from public.schema_migrations$$, '42501');
+select pg_temp.act('00000000-0000-0000-0000-00000000000c');  -- 部外者
+select pg_temp.count_is('select 1 from public.app_releases', 0);
+select pg_temp.count_is('select 1 from storage.objects', 0);
+select pg_temp.act('');                                      -- ログインしていない
+select pg_temp.count_is('select 1 from public.app_releases', 0);
+reset role; set role anon;
+select pg_temp.fails('select 1 from public.app_releases', '42501');
+reset role;
+select pg_temp.count_is($$select 1 from storage.objects where bucket_id = 'releases' and name = 'demo/0.2.0/a.exe'$$, 1);
+select pg_temp.count_is($$select 1 from public.schema_migrations$$, 5);
+set role authenticated;
+
 -- 最後の管理者は出られない・降りられない
 select pg_temp.act('00000000-0000-0000-0000-00000000000a');
 select pg_temp.fails($$delete from public.room_members where github_id = 101$$, '23514');

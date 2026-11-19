@@ -57,6 +57,18 @@ struct RawRoom {
 const ROOMS: &str = "/rest/v1/rooms?select=id,name,merge_by_author,deploy_by_author,ignore_checks,\
 room_repos(repo,everyone),room_members(github_id,login,is_admin,review,merge,deploy)&order=created_at";
 
+/// いちばん新しい版を 1 行だけ聞く。新しさは、出した順(版の字の順ではない)
+fn release_query(app: &str) -> String {
+    let app: String = app
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect();
+    format!(
+        "/rest/v1/app_releases?app=eq.{app}&select=version,min_version,files\
+         &order=created_at.desc&limit=1"
+    )
+}
+
 pub fn parse_rooms(text: &str) -> Result<Vec<Room>, String> {
     let raw: Vec<RawRoom> = serde_json::from_str(text).map_err(|e| {
         say!(
@@ -308,6 +320,9 @@ fn explain(status: u16, body: &str) -> String {
     }
 }
 
+/// 取るファイル 1 つの大きさの上限
+const FILE_LIMIT: u64 = 64 * 1024 * 1024;
+
 struct Http {
     db: Db,
     agent: ureq::Agent,
@@ -374,6 +389,34 @@ impl Http {
         } else {
             Err(explain(status, &text))
         }
+    }
+
+    /// ファイルを 1 つ、中身のまま取る。大きいので、待つ時間は長めにする
+    fn bytes(&self, path: &str, token: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{}{path}", self.db.url);
+        let fail =
+            |e: ureq::Error| say!("DB につながりません: {e}", "Cannot reach the database: {e}");
+        let mut response = self
+            .agent
+            .get(&url)
+            .config()
+            .timeout_global(Some(std::time::Duration::from_secs(300)))
+            .build()
+            .header("apikey", &self.db.key)
+            .header("authorization", &format!("Bearer {token}"))
+            .call()
+            .map_err(fail)?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let text = response.body_mut().read_to_string().unwrap_or_default();
+            return Err(explain(status, &text));
+        }
+        response
+            .body_mut()
+            .with_config()
+            .limit(FILE_LIMIT)
+            .read_to_vec()
+            .map_err(fail)
     }
 
     fn token(&self, grant: &str, body: &serde_json::Value) -> Result<Session, String> {
@@ -459,6 +502,20 @@ impl Client {
             );
         }
         Ok(rooms)
+    }
+
+    /// 配っているものの、いちばん新しい版。まだ 1 つも出ていなければ `None`
+    pub fn latest_release(&self, app: &str) -> Result<Option<crate::update::Release>, String> {
+        let text = self.send("GET", &release_query(app), None)?;
+        crate::update::parse_release(&text)
+    }
+
+    /// 置き場のファイルを 1 つ取る
+    pub fn release_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.http.bytes(
+            &format!("/storage/v1/object/authenticated/releases/{path}"),
+            &self.token,
+        )
     }
 
     /// 足すか、すでにあれば書き換える
@@ -1118,6 +1175,17 @@ mod tests {
         assert!(parse_callback("GET /callback HTTP/1.1").is_err());
         assert!(parse_callback("GET /callback?code= HTTP/1.1").is_err());
         assert!(parse_callback("GET /favicon.ico HTTP/1.1").is_err());
+    }
+
+    #[test]
+    fn the_release_query_asks_for_one_app_and_takes_no_extra_filters() {
+        assert_eq!(
+            release_query("my-app"),
+            "/rest/v1/app_releases?app=eq.my-app&select=version,min_version,files&order=created_at.desc&limit=1"
+        );
+        // 名前に条件を足す字が混ざっても、聞く相手は変わらない
+        assert!(release_query("x&version=eq.9")
+            .starts_with("/rest/v1/app_releases?app=eq.xversioneq9&"));
     }
 
     #[test]

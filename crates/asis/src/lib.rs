@@ -8,9 +8,11 @@ pub mod github;
 pub mod host;
 pub mod lang;
 pub mod local;
+pub mod log;
 pub mod room;
 pub mod skill;
 pub mod tui;
+pub mod update;
 pub mod view;
 
 use config::Project;

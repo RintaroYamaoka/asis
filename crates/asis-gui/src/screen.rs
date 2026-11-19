@@ -250,7 +250,41 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
     if let Rooms::Failed(e) = &app.rooms {
         errors = errors.push(text(format!("Rooms: {e}")).size(13).color(BAD));
     }
-    let failed = app.error.is_some() || matches!(app.rooms, Rooms::Failed(_));
+    // 新しい版に入れ替えたこと・入れ替えられなかったこと
+    match update_outcome() {
+        Some(asis::update::Outcome::Ready(version)) => {
+            errors = errors.push(
+                text(if app.english {
+                    format!(
+                        "Version {version} is installed. It starts the next time you open AsIs."
+                    )
+                } else {
+                    format!("版 {version} を入れました。次に AsIs を開くと、その版で動きます。")
+                })
+                .size(13)
+                .color(DIM),
+            );
+        }
+        Some(asis::update::Outcome::Blocked(e)) => {
+            errors = errors.push(
+                text(if app.english {
+                    format!("This version can no longer be used, and the update failed: {e}")
+                } else {
+                    format!("この版はもう使えませんが、新しい版に入れ替えられませんでした: {e}")
+                })
+                .size(13)
+                .color(BAD),
+            );
+        }
+        Some(asis::update::Outcome::Nothing) | None => {}
+    }
+    // 上に出す行が 1 つでもあるか(読めなかった理由か、版の入れ替えの知らせ)
+    let noted = app.error.is_some()
+        || matches!(app.rooms, Rooms::Failed(_))
+        || matches!(
+            update_outcome(),
+            Some(asis::update::Outcome::Ready(_) | asis::update::Outcome::Blocked(_))
+        );
 
     let foot = row![
         cap("↑↓ Move"),
@@ -283,7 +317,7 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
     } else {
         responsive(move |size| room_page(app, page.clone(), size.width)).into()
     };
-    let main: Element<'_, Msg> = if failed {
+    let main: Element<'_, Msg> = if noted {
         column![container(errors).padding([8, 22]), rule(), body].into()
     } else {
         body
