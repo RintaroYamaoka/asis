@@ -128,6 +128,8 @@ struct App {
     /// 操作を GitHub に送っている最中
     busy: bool,
     loading: bool,
+    /// 読み込みの最中に読み直しを頼まれた。今のが終わったら、もう 1 回 読む
+    again: bool,
     /// 読み直しの合図の番号。最後に出した合図だけを受ける(合図が増えていかないように)
     tick: u64,
     /// 自分で描く上の帯(WSL のとき)
@@ -311,6 +313,7 @@ fn boot() -> (App, Task<Msg>) {
         notice: None,
         busy: false,
         loading: true,
+        again: false,
         tick: 0,
         bar: chrome::Bar::default(),
         synced: None,
@@ -385,6 +388,11 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 Err(e) => app.error = Some(e),
             }
             app.tick += 1;
+            // 読んでいる間に頼まれた読み直し(Sign out・部屋の変更など)を、落とさない
+            if std::mem::take(&mut app.again) {
+                app.loading = true;
+                return load(app.loader.clone(), true);
+            }
             return later(app.tick);
         }
         Msg::GhChecked(gh) => app.gh = Some(gh),
@@ -451,6 +459,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                         app.loading = true;
                         return load(app.loader.clone(), false);
                     }
+                    // 読んでいる最中なら、終わってからもう 1 回 読む
+                    app.again = true;
                 }
                 Err(e) => app.notice = Some((e, false)),
             }
@@ -483,6 +493,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::SignOut => match asis::room::sign_out() {
             Ok(_) => {
                 app.room = None;
+                // 読み直しを待たずに、その場で Sign out した画面にする
+                app.rooms = Rooms::SignedOut;
                 app.notice = Some((app.t("Sign out しました", "Signed out").into(), true));
                 return update(app, Msg::Refresh);
             }
@@ -549,7 +561,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::AskDelete => app.confirm_delete = true,
         // 古い合図は捨てる。読み込み中の合図も捨てる(読み終われば、次の合図が出る)
         Msg::Again(n) if n != app.tick => {}
-        Msg::Again(_) | Msg::Refresh if app.loading => {}
+        Msg::Again(_) if app.loading => {}
+        Msg::Refresh if app.loading => app.again = true,
         Msg::Again(_) => {
             app.loading = true;
             return load(app.loader.clone(), false);
@@ -601,6 +614,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                         app.loading = true;
                         return load(app.loader.clone(), true);
                     }
+                    // 読んでいる最中なら、終わってからもう 1 回 読む
+                    app.again = true;
                 }
                 Err(e) => app.notice = Some((e, false)),
             }

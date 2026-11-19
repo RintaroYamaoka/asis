@@ -95,13 +95,22 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
             0,
             Msg::Pop(Some(Pop::NewRoom)),
         ))
-        .push(Space::new().height(Length::Fill))
-        .push(tile(
-            "Settings".into(),
-            matches!(app.pop, Some(Pop::Settings(_))),
+        .push(Space::new().height(Length::Fill));
+    // Sign in していないことを、ボードの上でも分かるようにする(repo は gh の権限で読めるので、ボードは同じに見える)
+    if matches!(app.rooms, Rooms::SignedOut) {
+        rail = rail.push(tile(
+            "Sign in".into(),
+            true,
             0,
-            Msg::Pop(Some(Pop::Settings(SetTab::Look))),
+            Msg::Pop(Some(Pop::Settings(SetTab::Account))),
         ));
+    }
+    rail = rail.push(tile(
+        "Settings".into(),
+        matches!(app.pop, Some(Pop::Settings(_))),
+        0,
+        Msg::Pop(Some(Pop::Settings(SetTab::Look))),
+    ));
 
     // 2 列目:その部屋の repo とメンバー
     let section = app.room.and_then(|i| app.sections.get(i));

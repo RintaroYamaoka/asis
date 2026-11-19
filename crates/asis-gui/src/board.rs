@@ -3,13 +3,45 @@
 use super::*;
 use iced::widget::{column, row};
 
-/// ボードのカードの高さ。全部 同じ大きさにする(PR がまだ無い issue の 1 枚も同じ)。試作と同じ 136
-pub const CARD_H: f32 = 136.0;
+/// ボードのカードの高さ。全部 同じ大きさにする(PR がまだ無い issue の 1 枚も同じ)
+pub const CARD_H: f32 = 100.0;
+/// カードの幅。列が広いときは、この幅のカードを横に並べる(カードの形を、窓の幅で変えない)
+const CARD_MIN: f32 = 190.0;
+const CARD_MAX: f32 = 260.0;
+/// カードとカードの間
+const CARD_GAP: f32 = 9.0;
+
+/// 列の幅に、カードを横に何枚 並べるかと、1 枚の幅
+fn fit(col_w: f32) -> (usize, f32) {
+    let n = (((col_w + CARD_GAP) / (CARD_MIN + CARD_GAP)).floor() as usize).max(1);
+    let w = ((col_w - CARD_GAP * (n as f32 - 1.0)) / n as f32).min(CARD_MAX);
+    (n, w)
+}
+
+/// 1 つの列の中に、カードを並べる。列が広ければ横にも並べる
+fn cards<'a>(list: Vec<Element<'a, Msg>>, col_w: f32) -> Element<'a, Msg> {
+    let (n, w) = fit(col_w);
+    let mut out = column![].spacing(CARD_GAP);
+    let mut line = row![].spacing(CARD_GAP);
+    let mut in_line = 0;
+    for card in list {
+        line = line.push(container(card).width(w));
+        in_line += 1;
+        if in_line == n {
+            out = out.push(std::mem::replace(&mut line, row![].spacing(CARD_GAP)));
+            in_line = 0;
+        }
+    }
+    if in_line > 0 {
+        out = out.push(line);
+    }
+    out.into()
+}
 
 pub fn card_box<'a>(body: Element<'a, Msg>, line: Color, on: bool, msg: Msg) -> Element<'a, Msg> {
     mouse_area(
         container(body)
-            .padding([11, 12])
+            .padding([9, 12])
             .width(Length::Fill)
             .height(CARD_H)
             .clip(true)
@@ -39,7 +71,8 @@ pub fn pr_card<'a>(
     let body = column![
         row![
             container(
-                cap(format!("{} #{}", short(&v.repo), p.number)).wrapping(text::Wrapping::None)
+                cap(format!("{} #{} · {}", short(&v.repo), p.number, p.author))
+                    .wrapping(text::Wrapping::None)
             )
             .width(Length::Fill)
             .height(16)
@@ -56,24 +89,28 @@ pub fn pr_card<'a>(
         )
         .height(37)
         .clip(true),
-        Space::new().height(Length::Fill),
-        chip(p),
         row![
-            container(cap(p.author.clone()).wrapping(text::Wrapping::None))
-                .width(Length::Fill)
-                .height(16)
-                .clip(true),
+            container(chip(p)).width(Length::Fill).clip(true),
             if mine {
                 text("You").size(13).color(app.accent)
             } else if p.turn.is_empty() {
                 text("—").size(13).color(DIM)
             } else {
-                text(p.turn.join("・")).size(13).color(DIM)
+                // 番の人が多いときは、1 人目と残りの人数(全員は、開いた中身に出る)
+                text(match p.turn.as_slice() {
+                    [one] => one.clone(),
+                    [first, rest @ ..] => format!("{first} +{}", rest.len()),
+                    [] => String::new(),
+                })
+                .size(13)
+                .color(DIM)
+                .wrapping(text::Wrapping::None)
             },
         ]
-        .spacing(8),
+        .spacing(8)
+        .align_y(Alignment::Center),
     ]
-    .spacing(7);
+    .spacing(5);
     card_box(body.into(), line, on, Msg::Select(key, Some(p.number)))
 }
 
@@ -104,7 +141,8 @@ pub fn todo_card<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg>
 
 /// 真ん中:ボードかリスト。
 /// ボードは、issue ごとに段を分け、その issue の PR を状態の列に 1 枚ずつ置く。
-/// issue につながっていない PR は、一番下の段。列の幅は 190〜236 に収める。
+/// issue につながっていない PR は、一番下の段。
+/// 列は窓の幅いっぱいに 4 つ。カードの幅は 190〜260 のままで、列が広ければ横に並べる。
 pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
     let all = shown(app);
     let tasks = lanes(&all);
@@ -155,7 +193,7 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
             .into();
     }
 
-    let col_w = ((width - 44.0 - 42.0) / 4.0).clamp(190.0, 236.0);
+    let col_w = ((width - 44.0 - 42.0) / 4.0).max(CARD_MIN).floor();
     let cells = |mut pick: Box<dyn FnMut(usize) -> Element<'a, Msg> + 'a>| -> Element<'a, Msg> {
         let mut r = row![].spacing(14);
         for i in 0..4 {
@@ -235,14 +273,16 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
         .on_press(Msg::Select(key, None));
         let has_cards = r.prs.iter().any(|p| column_of_pr(p.mark).is_some());
         let lane = cells(Box::new(move |i| {
-            let mut c = column![].spacing(9);
-            for p in r.prs.iter().filter(|p| column_of_pr(p.mark) == Some(i)) {
-                c = c.push(pr_card(app, v, r, p));
-            }
+            let mut c: Vec<Element<'a, Msg>> = r
+                .prs
+                .iter()
+                .filter(|p| column_of_pr(p.mark) == Some(i))
+                .map(|p| pr_card(app, v, r, p))
+                .collect();
             if !has_cards && column_of(r.stage) == i {
-                c = c.push(todo_card(app, v, r));
+                c.push(todo_card(app, v, r));
             }
-            c.into()
+            cards(c, col_w)
         }));
         body = body
             .push(lane_head)
@@ -263,13 +303,12 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
         );
         let free2 = free.clone();
         let lane = cells(Box::new(move |i| {
-            let mut c = column![].spacing(9);
-            for (v, r) in free2.iter().filter(|(_, r)| column_of(r.stage) == i) {
-                if let Some(p) = r.prs.first() {
-                    c = c.push(pr_card(app, v, r, p));
-                }
-            }
-            c.into()
+            let c = free2
+                .iter()
+                .filter(|(_, r)| column_of(r.stage) == i)
+                .filter_map(|(v, r)| r.prs.first().map(|p| pr_card(app, v, r, p)))
+                .collect();
+            cards(c, col_w)
         }));
         body = body
             .push(container(lane).padding([2, 22]))
@@ -324,4 +363,22 @@ pub fn list_row<'a>(app: &App, v: &'a RepoView, r: &'a Row) -> Element<'a, Msg> 
         [9, 14],
         Msg::Select(key, pr),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_wide_column_puts_cards_side_by_side_instead_of_stretching_them() {
+        // ふつうの窓:1 枚ずつ。幅は列いっぱい
+        assert_eq!(fit(236.0), (1, 236.0));
+        // 1 枚しか入らない広さでは、カードを伸ばさない
+        assert_eq!(fit(380.0), (1, CARD_MAX));
+        // 2 枚 入る広さになったら、横に並べる
+        assert_eq!(fit(389.0), (2, 190.0));
+        assert_eq!(fit(600.0), (3, 194.0));
+        // 狭すぎても 1 枚は出す
+        assert_eq!(fit(120.0).0, 1);
+    }
 }
