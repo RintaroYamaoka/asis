@@ -152,6 +152,16 @@ pub struct PrLine {
     pub age: String,
     /// 番が付いたまま、3 日 動きが無い
     pub stale: bool,
+    /// PR の本文。書かれたまま
+    pub body: String,
+    /// どのブランチから、どのブランチへ(`feat/x → main`)
+    pub branch: String,
+    /// 足した行・消した行・変えたファイルの数
+    pub size: (u64, u64, u64),
+    /// 確認を頼まれている人
+    pub reviewers: Vec<String>,
+    /// 落ちているチェックの名前
+    pub failing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -281,6 +291,11 @@ pub fn build(
             turn: verdicts[i].turn.clone(),
             age,
             stale,
+            body: f.prs[i].body.clone(),
+            branch: format!("{} → {}", f.prs[i].head_ref, f.prs[i].base_ref),
+            size: f.pr_size.get(i).copied().unwrap_or_default(),
+            reviewers: f.prs[i].requested_reviewers.clone(),
+            failing: f.pr_failing[i].clone(),
         }
     };
 
@@ -737,6 +752,7 @@ pub(crate) mod tests {
             viewer: "bob".into(),
             pr_updated: vec!["2026-11-18T07:34:56Z".into(); n],
             pr_failing: vec![vec![], vec!["lint".into()], vec![], vec![]],
+            pr_size: vec![(120, 30, 5), (0, 0, 0), (0, 0, 0), (0, 0, 0)],
             prs,
             issues: vec![
                 IssueFacts {
@@ -809,6 +825,23 @@ pub(crate) mod tests {
         assert!(row(21).prs[0].stale);
         // 時刻が分からなければ、最後に動いたときから数える
         assert_eq!(row(23).age, "5h");
+    }
+
+    #[test]
+    fn a_pull_request_carries_what_its_page_would_show() {
+        let v = sample_refs(&[(20, "Closes #7\n\nWhy and how.")]);
+        let all: Vec<&Row> = v.groups.iter().flat_map(|g| &g.rows).collect();
+        let pr = |n: u64| {
+            all.iter()
+                .flat_map(|r| &r.prs)
+                .find(|p| p.number == n)
+                .unwrap()
+        };
+        assert_eq!(pr(20).body, "Closes #7\n\nWhy and how.");
+        assert_eq!(pr(20).branch, "7-login → main");
+        assert_eq!(pr(20).size, (120, 30, 5));
+        assert_eq!(pr(21).failing, vec!["lint"]);
+        assert!(pr(21).body.is_empty());
     }
 
     #[test]

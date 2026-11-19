@@ -84,8 +84,20 @@ pub fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
                         .color(TEXT)
                         .wrapping(text::Wrapping::WordOrGlyph),
                 )
-                .push(why(p.why.clone(), next, &p.age))
-                .push(cap(format!("by {}", p.author)));
+                .push(why(p.why.clone(), next, &p.age));
+            // GitHub の PR のページに出ているもの:誰が・どのブランチから・どれくらいの大きさで
+            let (added, removed, files) = p.size;
+            let mut facts = vec![format!("by {}", p.author), p.branch.clone()];
+            if files > 0 {
+                facts.push(format!("+{added} −{removed} · {files} files"));
+            }
+            d = d.push(cap(facts.join("  ·  ")));
+            if !p.reviewers.is_empty() {
+                d = d.push(cap(format!("Review requested: {}", p.reviewers.join(", "))));
+            }
+            if !p.failing.is_empty() {
+                d = d.push(cap(format!("Checks failing: {}", p.failing.join(", "))).color(BAD));
+            }
             if let Some(n) = notice_of(app) {
                 d = d.push(n);
             }
@@ -152,6 +164,17 @@ pub fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
             for l in &r.local {
                 d = d.push(cap(format!("Local  {}  {}", l.branch, l.panes.join(" / "))));
             }
+            // 本文は、書かれたまま
+            d = d.push(cap("Description")).push(
+                text(if p.body.trim().is_empty() {
+                    "No description".to_string()
+                } else {
+                    p.body.clone()
+                })
+                .size(14)
+                .color(DIM)
+                .wrapping(text::Wrapping::WordOrGlyph),
+            );
             d = d.push(seg(
                 format!("Open PR #{number} on GitHub"),
                 false,

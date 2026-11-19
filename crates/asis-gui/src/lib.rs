@@ -209,6 +209,8 @@ struct App {
     synced: Option<Instant>,
     /// この窓を開いた時刻
     started: Instant,
+    /// 新しい版があるか、確かめている最中
+    checking: bool,
     error: Option<String>,
     accent: Color,
     /// 説明の文を英語で出すか(大事な単語は、どちらでも英語)
@@ -290,6 +292,9 @@ enum Msg {
     UpdateChecked(asis::update::Outcome),
     /// 新しい版を、ソースから作り直す(人が押した)
     Rebuild(String),
+    /// 新しい版があるか、今すぐ確かめる(設定の About から)
+    CheckUpdate,
+    UpdateNow(asis::update::Outcome),
     Again(u64),
     Key(keyboard::Event),
 }
@@ -423,6 +428,7 @@ fn boot() -> (App, Task<Msg>) {
         bar: chrome::Bar::default(),
         synced: None,
         started: Instant::now(),
+        checking: false,
         error: None,
         accent,
         english,
@@ -750,6 +756,43 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 app.notice = Some((e.to_string(), false));
             }
         },
+        Msg::CheckUpdate => {
+            let (Some(target), Some(dir)) = (UPDATE_APP.get().cloned(), exe_dir()) else {
+                return Task::none();
+            };
+            app.checking = true;
+            app.notice = None;
+            return Task::perform(
+                async move {
+                    match asis::config::load().ok().and_then(|local| local.db) {
+                        Some(db) => asis::update::run_once(&target, &dir, &db),
+                        None => asis::update::Outcome::Nothing,
+                    }
+                },
+                Msg::UpdateNow,
+            );
+        }
+        // 押して確かめた結果。新しい版が入ったら、そのまま開き直す(押した人は、今すぐ新しくしたい)
+        Msg::UpdateNow(outcome) => {
+            app.checking = false;
+            if let Ok(mut slot) = UPDATE.lock() {
+                *slot = Some(outcome.clone());
+            }
+            match outcome {
+                asis::update::Outcome::Ready(_) => return update(app, Msg::Restart),
+                asis::update::Outcome::Available(version) => {
+                    return update(app, Msg::Rebuild(version))
+                }
+                asis::update::Outcome::Blocked(e) => app.notice = Some((e, false)),
+                asis::update::Outcome::Nothing => {
+                    app.notice = Some((
+                        app.t("いちばん新しい版です", "This is the newest version")
+                            .into(),
+                        true,
+                    ))
+                }
+            }
+        }
         Msg::Rebuild(version) => {
             if let Err(e) = ask_rebuild(&version, true) {
                 app.notice = Some((e, false));
@@ -1202,6 +1245,11 @@ fn watch_updates(app: asis::update::App) {
             std::thread::sleep(UPDATE_EVERY);
         }
     });
+}
+
+/// 自分で新しい版に入れ替わる版か(配る人が、配るものの名前と版を渡して起こしたか)
+pub fn updates_itself() -> bool {
+    UPDATE_APP.get().is_some()
 }
 
 /// いちばん最近 確かめた結果(画面に 1 行で出す)
