@@ -1,0 +1,5 @@
+# どの OS で取り出しても、改行は LF のままにする(手順書の中身を実行ファイルに埋め込むので、CRLF になると入れる中身が変わる)
+* text=auto eol=lf
+*.rgba binary
+*.ico binary
+*.png binary
