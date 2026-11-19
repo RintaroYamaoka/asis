@@ -799,7 +799,7 @@ pub fn about(_: &App) -> Element<'_, Msg> {
         sect(
             row![
                 label("AsIs", "development, as is · MIT"),
-                text(env!("CARGO_PKG_VERSION")).size(14).color(DIM),
+                text(version()).size(14).color(DIM),
             ]
             .spacing(10)
             .align_y(Alignment::Center)

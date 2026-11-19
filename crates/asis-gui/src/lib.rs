@@ -35,6 +35,16 @@ static PLATFORM: OnceLock<chrome::Platform> = OnceLock::new();
 
 /// 差し込まれた読み口(repo の中のファイルに書かれたタスク)。`run` で決まり、読み込みのたびに使う
 static READER: OnceLock<Option<Arc<dyn asis::extra::Reader>>> = OnceLock::new();
+/// 新しい版を確かめた結果。確かめる側(裏の 1 本)が書き、画面が読む
+static UPDATE: Mutex<Option<asis::update::Outcome>> = Mutex::new(None);
+/// 画面に出す版。配る側が渡した版、無ければこの部品の版
+static VERSION: OnceLock<String> = OnceLock::new();
+
+pub fn version() -> &'static str {
+    VERSION
+        .get()
+        .map_or(env!("CARGO_PKG_VERSION"), |v| v.as_str())
+}
 
 fn reader() -> Option<Arc<dyn asis::extra::Reader>> {
     READER.get().cloned().flatten()
@@ -986,9 +996,61 @@ fn subscription(_: &App) -> Subscription<Msg> {
     })
 }
 
+/// 新しい版を確かめる間隔
+const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
+
+/// 動いている exe のフォルダで、新しい版を確かめ続ける。新しければ裏で入れ替える(次に開くと、その版で動く)。
+/// 最初の 1 回は、読み込みの邪魔をしないよう少し待つ
+fn watch_updates(app: asis::update::App) {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
+    else {
+        return;
+    };
+    // 前の入れ替えで退かした古いファイルを消す(動いている間は消せなかったもの)
+    asis::update::clean(&dir);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(10));
+        loop {
+            if let Some(db) = asis::config::load().ok().and_then(|local| local.db) {
+                let outcome = asis::update::run_once(&app, &dir, &db);
+                if let Ok(mut slot) = UPDATE.lock() {
+                    *slot = Some(outcome);
+                }
+            }
+            std::thread::sleep(UPDATE_EVERY);
+        }
+    });
+}
+
+/// いちばん最近 確かめた結果(画面に 1 行で出す)
+pub fn update_outcome() -> Option<asis::update::Outcome> {
+    UPDATE.lock().ok().and_then(|slot| slot.clone())
+}
+
 /// 窓を開く。`reader` を渡すと、repo の中のファイルに書かれたタスクも出す(`asis::extra` を参照)
 pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
+    run_with(reader, None)
+}
+
+/// 窓を開く。`app` を渡すと、その名前で配られている新しい版に、自分で入れ替える(`asis::update` を参照)。
+/// 渡さなければ、入れ替えない(自分でビルドして使う人のため)
+pub fn run_with(
+    reader: Option<Arc<dyn asis::extra::Reader>>,
+    app: Option<asis::update::App>,
+) -> iced::Result {
     let _ = READER.set(reader);
+    let version = app
+        .as_ref()
+        .map_or(env!("CARGO_PKG_VERSION"), |a| a.version.as_str())
+        .to_string();
+    let name = app
+        .as_ref()
+        .map_or("asis-gui", |a| a.name.as_str())
+        .to_string();
+    asis::log::record_panics(&name, &version);
+    let _ = VERSION.set(version);
     // 日本語が入っている、その OS の字
     let font = if cfg!(windows) {
         "Yu Gothic UI"
@@ -1000,6 +1062,9 @@ pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
     // WSL から開かれて、Windows 版が入っていれば、窓はそちらに任せる
     if let Some(status) = chrome::hand_off_to_windows() {
         std::process::exit(status.code().unwrap_or(0));
+    }
+    if let Some(app) = app {
+        watch_updates(app);
     }
     let platform = *PLATFORM.get_or_init(chrome::Platform::detect);
     // 窓の最初の大きさ。`ASIS_WINDOW=1366x768` で変えられる(いろいろな画面の形で確かめる用)
