@@ -9,6 +9,7 @@ pub mod host;
 pub mod lang;
 pub mod local;
 pub mod log;
+pub mod plans;
 pub mod room;
 pub mod skill;
 pub mod tui;
@@ -30,6 +31,7 @@ const HELP: &str = "asis — development, as is
   asis remove <owner/repo> 見る repo から外す
   asis login               GitHub でログインする(部屋を使うとき)
   asis room                部屋(repo・メンバー・役割をまとめたもの)。`asis room help` で一覧
+  asis plans               部屋に送られた計画。`asis plans help` で、送り方
 
   --plain                  画面を開かず、文字で出す
   --mine                   自分の番のものだけ出す
@@ -72,6 +74,9 @@ pub fn run() -> Result<(), String> {
         Some("login" | "logout" | "room")
     ) {
         return room::cli(&raw);
+    }
+    if raw.first().map(String::as_str) == Some("plans") {
+        return plans::cli(&raw, &room::client()?);
     }
     // `asis local <owner/repo>...`: この PC の上の作業を JSON で出す。
     // Windows で開いた窓が、WSL の中の作業を知るために呼ぶ(人が打つためのものではない)

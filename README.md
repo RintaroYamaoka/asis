@@ -76,6 +76,17 @@ key = "公開用の鍵(publishable / anon)"
 
 用意のしかた:[supabase/migrations](supabase/migrations) の SQL を順に流す。Authentication で GitHub のログインを有効にし(GitHub に OAuth App を登録する)、Redirect URLs に `http://127.0.0.1:53682/callback` を足す。部屋を作ってよい人の GitHub の番号を、表 `room_creators` に入れる。
 
+## 計画を送る
+
+計画を issue ではなく手元の文書に書いている人は、その一覧を部屋に送れる。
+
+```
+asis plans push plans.json     # 計画を送る(- にすると、流し込まれたものを読む)
+asis plans                     # 部屋の計画を出す
+```
+
+JSON の並びで、1 件に番号の欄(番号・number・key・id のどれか)があれば、ほかの欄は自由。同じ番号は書き換える。
+
 ## AI に渡す決まり
 
 PR がどの issue の仕事かは、2 つの書き方から読む。ブランチ名を issue の番号で始める(`12-short-name` か `feature/12-short-name`)。PR の本文に `Closes #12` か `Refs #12` を書く。
