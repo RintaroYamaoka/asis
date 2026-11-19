@@ -228,7 +228,18 @@ fn load(loader: Arc<Mutex<Option<Loader>>>, force: bool) -> Task<Msg> {
                         Rooms::Read(r) => r.as_slice(),
                         _ => &[],
                     };
-                    let source = asis::source_of(local.clone(), list, &[]);
+                    // Sign in していない間は、何も出さない(はじめの画面で Sign in を求める)。
+                    // 手元の設定に見る repo が残っていても、窓では Room に入っている人にだけ見せる
+                    let source = if matches!(rooms, Rooms::SignedOut) {
+                        asis::Source {
+                            watch: vec![],
+                            only: Default::default(),
+                            roots: vec![],
+                            local: vec![],
+                        }
+                    } else {
+                        asis::source_of(local.clone(), list, &[])
+                    };
                     match guard.as_mut() {
                         Some(l) => l.set_source(source),
                         None => *guard = Some(Loader::new(source).with_reader(reader())),
@@ -493,8 +504,13 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::SignOut => match asis::room::sign_out() {
             Ok(_) => {
                 app.room = None;
-                // 読み直しを待たずに、その場で Sign out した画面にする
+                // 読み直しを待たずに、その場で Sign out した画面(はじめの画面)にする
                 app.rooms = Rooms::SignedOut;
+                app.sections = Arc::new(Vec::new());
+                app.repo = None;
+                app.selected = None;
+                app.open = false;
+                app.pop = None;
                 app.notice = Some((app.t("Sign out しました", "Signed out").into(), true));
                 return update(app, Msg::Refresh);
             }
