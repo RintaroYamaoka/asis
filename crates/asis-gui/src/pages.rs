@@ -726,13 +726,49 @@ fn room_settings(app: &App) -> Element<'_, Msg> {
     if !admin {
         c = c.push(only_admin(app));
     }
+    let new_name = app.form.rename.trim().to_string();
+    let rename = (can && !new_name.is_empty() && new_name != room.name)
+        .then(|| Msg::RoomOp(Op::Rename(room.id.clone(), new_name)));
+    // 取り込む人・本番に出す人を、役の人にするか、PR を出した本人にするか
+    let by_author = |name: &str, role: Role, on: bool| -> Element<'_, Msg> {
+        row![
+            label(
+                name,
+                if on {
+                    app.t("PR を出した本人", "The PR author")
+                } else {
+                    app.t(
+                        "その役を持つ Members(居なければ、PR を出した本人)",
+                        "Members with that role (the PR author if there is none)",
+                    )
+                },
+            ),
+            tog(
+                "By the PR author",
+                on,
+                app.accent,
+                can.then(|| Msg::RoomOp(Op::ByAuthor(room.id.clone(), role, !on))),
+            ),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into()
+    };
     c.push(sect(
         column![
             h4("General"),
-            row![
-                text("Name").size(14).color(TEXT).width(Length::Fill),
-                text(room.name.clone()).size(14).color(DIM),
-            ],
+            lines(vec![
+                row![
+                    label("Name", &room.name),
+                    input("New name", &app.form.rename, Field::Rename, rename.clone()).width(260),
+                    seg_opt("Rename", rename),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .into(),
+                by_author("Who merges", Role::Merge, room.merge_by_author),
+                by_author("Who deploys", Role::Deploy, room.deploy_by_author),
+            ]),
         ]
         .spacing(10)
         .into(),

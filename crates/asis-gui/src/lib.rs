@@ -90,6 +90,8 @@ enum Look {
 #[derive(Default)]
 struct Form {
     room_name: String,
+    /// 部屋の名前を変える欄
+    rename: String,
     invite: String,
     repo: String,
     check: String,
@@ -102,6 +104,7 @@ struct Form {
 #[derive(Clone, Copy)]
 enum Field {
     RoomName,
+    Rename,
     Invite,
     Repo,
     Check,
@@ -123,6 +126,9 @@ enum Op {
     Kick(String, i64),
     Leave(String),
     Checks(String, Vec<String>),
+    Rename(String, String),
+    /// 取り込む・本番に出すのを、PR を出した本人にするか
+    ByAuthor(String, Role, bool),
     Delete(String),
 }
 
@@ -508,6 +514,7 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             let f = &mut app.form;
             *match field {
                 Field::RoomName => &mut f.room_name,
+                Field::Rename => &mut f.rename,
                 Field::Invite => &mut f.invite,
                 Field::Repo => &mut f.repo,
                 Field::Check => &mut f.check,
@@ -987,6 +994,14 @@ fn run_op(op: Op) -> Result<String, String> {
         }
         Op::Checks(room, list) => {
             c.set_ignore(&room, &list)?;
+            String::new()
+        }
+        Op::Rename(room, name) => {
+            let name = c.rename(&room, &name)?;
+            say!("名前を {name} に変えました", "Renamed to {name}")
+        }
+        Op::ByAuthor(room, role, on) => {
+            c.set_by_author(&room, role, on)?;
             String::new()
         }
         Op::Delete(room) => {
