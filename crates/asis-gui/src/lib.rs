@@ -40,6 +40,18 @@ static UPDATE: Mutex<Option<asis::update::Outcome>> = Mutex::new(None);
 /// 画面に出す版。配る側が渡した版、無ければこの部品の版
 static VERSION: OnceLock<String> = OnceLock::new();
 
+/// 手順書(issue の番号でブランチを切る決まり)を入れる所を、画面に出さない。
+/// 別の決まりで作業している人に配るとき、起こす側が先に呼ぶ(入れると、その人の付け方とぶつかる)
+pub fn without_skill() {
+    SKILL_OFFERED.store(false, std::sync::atomic::Ordering::Relaxed);
+}
+
+static SKILL_OFFERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+fn skill_offered() -> bool {
+    SKILL_OFFERED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn version() -> &'static str {
     VERSION
         .get()
@@ -51,8 +63,10 @@ fn reader() -> Option<Arc<dyn asis::extra::Reader>> {
 }
 use std::time::{Duration, Instant};
 
-/// 開いたままのとき、何秒ごとに読み直すか
-const EVERY: Duration = Duration::from_secs(30);
+/// 開いたままのとき、何秒ごとに「変わったか」を聞くか。
+/// 聞くのは 1 回 1 点(全部の repository をまとめて)。変わっていた repository だけ読み直す。
+/// 使う人の GitHub の枠(1 時間 5,000 点)を、その人のほかの道具と分け合うので、急がない。今すぐ見たいときは R
+const EVERY: Duration = Duration::from_secs(120);
 
 /// 行を指す鍵(repo・種類・番号・題)。読み直しても同じ行を選んだままにする
 type Key = (String, Kind, u64, String);
@@ -265,6 +279,8 @@ enum Msg {
     WriteBody(String),
     Open(String),
     Refresh,
+    /// 入れ替えた新しい版で、開き直す
+    Restart,
     Again(u64),
     Key(keyboard::Event),
 }
@@ -708,6 +724,21 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Refresh => {
             app.loading = true;
             return load(app.loader.clone(), true);
+        }
+        Msg::Restart => {
+            // 同じ場所の実行ファイル(もう新しい版に入れ替わっている)を、同じ引数で起こしてから閉じる
+            let started = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .args(std::env::args_os().skip(1))
+                    .spawn()
+            });
+            match started {
+                Ok(_) => return iced::exit(),
+                Err(e) => {
+                    asis::log::line(&format!("restart: {e}"));
+                    app.notice = Some((e.to_string(), false));
+                }
+            }
         }
         Msg::Room(room) => {
             app.room = room;
