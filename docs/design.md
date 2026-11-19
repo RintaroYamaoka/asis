@@ -194,7 +194,6 @@ Appearance(1 色・説明の文の言葉)/ Account(gh の名前・部屋の Sign
 
 - 部屋の定義を変えられるのは Admin だけ。Admin でない人には、その旨を出して押せなくする。Admin が 1 人もいなくなる変更は、送る前に止める。
 - 前に出すのは「1 件を開く」と「1 件を作る」だけ:issue の中身・PR の中身・New issue・New room(名前だけで作る。作ったら、その部屋の Repositories を開く)。
-- issue の中身から、Claude に渡す一言(「#12 を始めて」)を写せる。
 - 読めていない repository も、カードで出す(黙って消さない)。
 - **ボードの代わりに出す画面**:gh が無い・ログインしていない → 直し方の 2 手と「Check again」。部屋が無い・Sign in していない → はじめの画面(Sign in → New room → Claude をつなぐ)。読み込み中 → Loading。
 

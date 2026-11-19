@@ -223,8 +223,6 @@ enum Msg {
     Go(Page),
     Area(Area),
     Look(Look),
-    /// 字をクリップボードに写す
-    Copy(String),
     SkillInstall,
     AddRoot,
     DropRoot(String),
@@ -696,17 +694,6 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             }
         }
         Msg::Look(look) => app.look = look,
-        Msg::Copy(text) => {
-            app.notice = Some((
-                if app.english {
-                    format!("Copied: {text}")
-                } else {
-                    format!("コピーしました: {text}")
-                },
-                true,
-            ));
-            return iced::clipboard::write(text);
-        }
         Msg::SkillInstall => match asis::skill::install() {
             Ok(dir) => {
                 app.skill = true;
