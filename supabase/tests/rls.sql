@@ -78,6 +78,28 @@ reset role; set role anon;
 select pg_temp.fails('select 1 from public.rooms', '42501');
 reset role; set role authenticated;
 
+-- 計画。読むのも送るのも、その部屋のメンバーだけ(役は問わない)。誰が送ったかは、送る側に書かせない
+select pg_temp.act('00000000-0000-0000-0000-00000000000b');  -- bob(役なしのメンバー)
+insert into public.plans (room_id, key, data, sent_by) select room, 'T-1', '{"題":"a"}', 999 from pg_temp.ids;
+select pg_temp.count_is($$select 1 from public.plans where key = 'T-1' and sent_by = 102$$, 1);
+insert into public.plans (room_id, key, data) select room, 'T-1', '{"題":"b"}' from pg_temp.ids
+  on conflict (room_id, key) do update set data = excluded.data;
+select pg_temp.count_is($$select 1 from public.plans where data->>'題' = 'b'$$, 1);
+select pg_temp.fails($$insert into public.plans (room_id, key, data) select room, 'T-2', '[1]' from pg_temp.ids$$, '23514');
+select pg_temp.fails($$insert into public.plans (room_id, key, data) select room, '', '{}' from pg_temp.ids$$, '23514');
+select pg_temp.act('00000000-0000-0000-0000-00000000000a');  -- alice(管理者)にも見える
+select pg_temp.count_is('select 1 from public.plans', 1);
+select pg_temp.act('00000000-0000-0000-0000-00000000000c');  -- 部外者には見えず、送れず、変えられない
+select pg_temp.count_is('select 1 from public.plans', 0);
+select pg_temp.fails($$insert into public.plans (room_id, key, data) select room, 'T-9', '{}' from pg_temp.ids$$, '42501');
+update public.plans set data = '{"題":"evil"}';
+delete from public.plans;
+reset role; set role anon;
+select pg_temp.fails('select 1 from public.plans', '42501');
+reset role;
+select pg_temp.count_is($$select 1 from public.plans where data->>'題' = 'b'$$, 1);
+set role authenticated;
+
 -- 配るアプリの版。書けるのは DB を動かしている人だけ。読めるのは、どこかの部屋に入っている人だけ
 reset role;
 insert into public.app_releases (app, version, min_version, files) values ('demo', '0.2.0', '0.1.0', '[]');
@@ -104,7 +126,7 @@ reset role; set role anon;
 select pg_temp.fails('select 1 from public.app_releases', '42501');
 reset role;
 select pg_temp.count_is($$select 1 from storage.objects where bucket_id = 'releases' and name = 'demo/0.2.0/a.exe'$$, 1);
-select pg_temp.count_is($$select 1 from public.schema_migrations$$, 5);
+select pg_temp.count_is($$select 1 from public.schema_migrations$$, 6);
 set role authenticated;
 
 -- 最後の管理者は出られない・降りられない
@@ -124,4 +146,5 @@ reset role;
 select pg_temp.count_is('select 1 from public.rooms', 0);
 select pg_temp.count_is('select 1 from public.room_members', 0);
 select pg_temp.count_is('select 1 from public.room_repos', 0);
+select pg_temp.count_is('select 1 from public.plans', 0);  -- 部屋を消すと、計画も消える
 \echo RLS OK

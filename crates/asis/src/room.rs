@@ -518,6 +518,28 @@ impl Client {
         )
     }
 
+    /// 部屋に計画を送る。同じ番号は書き換える。送らなかった番号は、そのまま残る
+    pub fn push_plans(&self, room: &str, plans: &[crate::plans::Plan]) -> Result<(), String> {
+        if plans.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<serde_json::Value> = plans
+            .iter()
+            .map(|p| serde_json::json!({ "room_id": room, "key": p.key, "data": p.data }))
+            .collect();
+        self.upsert("plans", "room_id,key", &serde_json::Value::Array(rows))
+    }
+
+    /// 部屋の計画。番号の順
+    pub fn plans(&self, room: &str) -> Result<Vec<crate::plans::Plan>, String> {
+        let text = self.send(
+            "GET",
+            &format!("/rest/v1/plans?room_id=eq.{room}&select=key,data&order=key"),
+            None,
+        )?;
+        crate::plans::parse_rows(&text)
+    }
+
     /// 足すか、すでにあれば書き換える
     fn upsert(&self, table: &str, conflict: &str, body: &serde_json::Value) -> Result<(), String> {
         self.http
@@ -985,7 +1007,7 @@ fn need_db() -> Result<Db, String> {
     })
 }
 
-fn client() -> Result<Client, String> {
+pub fn client() -> Result<Client, String> {
     Client::open(&need_db()?)?.ok_or_else(|| {
         lang::t(
             "ログインしていません。`asis login` をしてください",
