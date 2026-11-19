@@ -11,9 +11,23 @@ use iced::widget::{column, row};
 
 /// ページの中身の幅の上限
 const PAGE_W: f32 = 1040.0;
-/// カードの大きさ。一覧のカードは、全部 同じ大きさ
-const TILE_W: f32 = 240.0;
-const TILE_H: f32 = 104.0;
+/// 一覧のカードの大きさ(いちばん狭い幅と、高さ)。中身に合わせて、一覧ごとに決める。
+/// ボードのカード(PR 1 本)とは別のものなので、大きさをそろえない
+#[derive(Clone, Copy)]
+struct Tile {
+    width: f32,
+    height: f32,
+}
+/// repository のカード。部屋の入口なので、大きく
+const REPO_TILE: Tile = Tile {
+    width: 300.0,
+    height: 128.0,
+};
+/// 人のカード。名前・GitHub の場所・役の 3 行
+const MEMBER_TILE: Tile = Tile {
+    width: 270.0,
+    height: 108.0,
+};
 const TILE_GAP: f32 = 12.0;
 
 /// ページの外枠。縦に長ければ、中だけが動く。
@@ -71,29 +85,29 @@ fn only_admin<'a>(app: &App) -> Element<'a, Msg> {
 }
 
 /// 押せるカード
-fn tile<'a>(body: Element<'a, Msg>, line: Color, msg: Msg) -> Element<'a, Msg> {
-    mouse_area(still(body, line)).on_press(msg).into()
+fn tile<'a>(body: Element<'a, Msg>, line: Color, size: Tile, msg: Msg) -> Element<'a, Msg> {
+    mouse_area(still(body, line, size)).on_press(msg).into()
 }
 
 /// 押せないカード(足す・招く)
-fn still<'a>(body: Element<'a, Msg>, line: Color) -> Element<'a, Msg> {
+fn still<'a>(body: Element<'a, Msg>, line: Color, size: Tile) -> Element<'a, Msg> {
     container(body)
-        .padding([13, 16])
+        .padding([14, 18])
         .width(Length::Fill)
-        .height(TILE_H)
+        .height(size.height)
         .clip(true)
         .style(boxed(line, Color::TRANSPARENT))
         .into()
 }
 
 /// その幅に、カードを横に何枚 並べるか
-fn per_line(width: f32) -> usize {
-    (((width + TILE_GAP) / (TILE_W + TILE_GAP)).floor() as usize).max(1)
+fn per_line(width: f32, size: Tile) -> usize {
+    (((width + TILE_GAP) / (size.width + TILE_GAP)).floor() as usize).max(1)
 }
 
 /// カードを、幅に入るだけ横に並べる。足りない所は空けて、カードの幅をそろえる
-fn grid<'a>(cards: Vec<Element<'a, Msg>>, width: f32) -> Element<'a, Msg> {
-    let n = per_line(width);
+fn grid<'a>(cards: Vec<Element<'a, Msg>>, width: f32, size: Tile) -> Element<'a, Msg> {
+    let n = per_line(width, size);
     let mut out = column![].spacing(TILE_GAP);
     let mut line = row![].spacing(TILE_GAP);
     let mut in_line = 0;
@@ -116,7 +130,7 @@ fn grid<'a>(cards: Vec<Element<'a, Msg>>, width: f32) -> Element<'a, Msg> {
 
 /// 部屋のページ。`width` は、真ん中の幅
 pub fn room_page(app: &App, page: Page, width: f32) -> Element<'_, Msg> {
-    let inner = (width - 52.0).max(TILE_W);
+    let inner = (width - 52.0).max(MEMBER_TILE.width);
     match page {
         Page::Repos | Page::Repo(_) => frame(repos(app, inner), true),
         Page::RepoSettings(repo) => frame(repo_settings(app, repo), false),
@@ -197,11 +211,11 @@ fn repos(app: &App, width: f32) -> Element<'_, Msg> {
             cap(format!("{owner} /")),
             container(
                 text(short(&v.repo).to_string())
-                    .size(15)
+                    .size(18)
                     .color(TEXT)
                     .wrapping(text::Wrapping::None)
             )
-            .height(22)
+            .height(26)
             .clip(true),
             Space::new().height(Length::Fill),
             foot.push(cap("›")),
@@ -210,6 +224,7 @@ fn repos(app: &App, width: f32) -> Element<'_, Msg> {
         cards.push(tile(
             body.into(),
             if mine > 0 { app.accent } else { FRAME },
+            REPO_TILE,
             Msg::Go(Page::Repo(v.repo.clone())),
         ));
     }
@@ -218,7 +233,7 @@ fn repos(app: &App, width: f32) -> Element<'_, Msg> {
         let owner = name.split('/').next().unwrap_or_default().to_string();
         let body = column![
             cap(format!("{owner} /")),
-            text(short(&name).to_string()).size(15).color(DIM),
+            text(short(&name).to_string()).size(18).color(DIM),
             Space::new().height(Length::Fill),
             row![
                 if app.loading && app.synced.is_none() {
@@ -232,7 +247,12 @@ fn repos(app: &App, width: f32) -> Element<'_, Msg> {
             .align_y(Alignment::Center),
         ]
         .spacing(3);
-        cards.push(tile(body.into(), FRAME, Msg::Go(Page::RepoSettings(name))));
+        cards.push(tile(
+            body.into(),
+            FRAME,
+            REPO_TILE,
+            Msg::Go(Page::RepoSettings(name)),
+        ));
     }
     if let Some(room) = room.filter(|_| admin) {
         let repo = app.form.repo.trim().to_string();
@@ -252,6 +272,7 @@ fn repos(app: &App, width: f32) -> Element<'_, Msg> {
             ]
             .into(),
             LINE2,
+            REPO_TILE,
         ));
     }
     let mut c = column![
@@ -275,7 +296,7 @@ fn repos(app: &App, width: f32) -> Element<'_, Msg> {
             "No repositories yet"
         }));
     } else {
-        c = c.push(grid(cards, width));
+        c = c.push(grid(cards, width, REPO_TILE));
     }
     c.push(notice_line(app)).into()
 }
@@ -477,6 +498,9 @@ fn members(app: &App, width: f32) -> Element<'_, Msg> {
             ]
             .spacing(9)
             .align_y(Alignment::Center),
+            container(cap(format!("github.com/{}", m.login)).wrapping(text::Wrapping::None))
+                .height(16)
+                .clip(true),
             Space::new().height(Length::Fill),
             row![
                 text(format!("{n} waiting"))
@@ -494,6 +518,7 @@ fn members(app: &App, width: f32) -> Element<'_, Msg> {
         cards.push(tile(
             body.into(),
             if mine && n > 0 { app.accent } else { FRAME },
+            MEMBER_TILE,
             Msg::Go(Page::Member(m.github_id)),
         ));
     }
@@ -520,6 +545,7 @@ fn members(app: &App, width: f32) -> Element<'_, Msg> {
             ]
             .into(),
             LINE2,
+            MEMBER_TILE,
         ));
     }
     let mut c = column![
@@ -537,7 +563,7 @@ fn members(app: &App, width: f32) -> Element<'_, Msg> {
     if !admin {
         c = c.push(only_admin(app));
     }
-    c.push(grid(cards, width))
+    c.push(grid(cards, width, MEMBER_TILE))
         .push(cap(app.t(
             "Invite された人は、次に開いたとき、この Room が出ます。Invite しても、repository を見る権限は渡りません。",
             "Invited people see this Room the next time they open AsIs. An invite never grants access to a repository."
@@ -611,6 +637,16 @@ fn member(app: &App, id: i64) -> Element<'_, Msg> {
     if !admin {
         c = c.push(only_admin(app));
     }
+    let url = format!("https://github.com/{}", m.login);
+    c = c.push(sect(
+        row![
+            label("GitHub", &format!("github.com/{}", m.login)),
+            seg(format!("Open {} on GitHub", m.login), false, Msg::Open(url)),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .into(),
+    ));
     c = c.push(sect(
         column![
             h4("Roles"),
@@ -780,9 +816,15 @@ mod tests {
 
     #[test]
     fn cards_fill_the_width_and_never_drop_below_one() {
-        assert_eq!(per_line(100.0), 1);
-        assert_eq!(per_line(TILE_W), 1);
-        assert_eq!(per_line(TILE_W * 2.0 + TILE_GAP), 2);
-        assert_eq!(per_line(PAGE_W), 4);
+        let size = Tile {
+            width: 240.0,
+            height: 100.0,
+        };
+        assert_eq!(per_line(100.0, size), 1);
+        assert_eq!(per_line(240.0, size), 1);
+        assert_eq!(per_line(240.0 * 2.0 + TILE_GAP, size), 2);
+        // 大きいカードは、同じ幅に入る枚数が減る
+        assert_eq!(per_line(1000.0, size), 4);
+        assert_eq!(per_line(1000.0, REPO_TILE), 3);
     }
 }

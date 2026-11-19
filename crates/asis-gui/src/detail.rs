@@ -246,25 +246,24 @@ pub fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
 /// issue を書く。1 行でよい。型は無い
 pub fn write_form(app: &App) -> Option<Element<'_, Msg>> {
     let w = app.write.as_ref()?;
-    let repos: Vec<String> = repos_of(app);
     let send = Msg::Act(asis::act::Action::WriteIssue {
         repo: w.repo.clone().unwrap_or_default(),
         title: w.title.clone(),
         body: w.body.clone(),
     });
     let ready = !app.busy && w.repo.is_some() && !w.title.trim().is_empty();
-    let mut picks = row![].spacing(6);
-    for repo in repos {
-        let on = w.repo.as_deref() == Some(repo.as_str());
-        picks = picks.push(seg(short(&repo).to_string(), on, Msg::WriteRepo(repo)));
-    }
+    // 出し先は選ばせない。いま見ている repository に出す
     let mut d = column![
-        text("New issue").size(18).color(TEXT),
+        row![
+            text("New issue").size(18).color(TEXT),
+            cap(format!("in {}", w.repo.as_deref().unwrap_or_default())),
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center),
         cap(app.t(
             "1 行でよい。型は無い。書いたものが、そのまま AI への指示になる。",
             "One line is enough. No template. What you write becomes the instruction for the AI."
         )),
-        picks.wrap(),
         field("Title", &w.title, Msg::WriteTitle, send.clone()),
         field(
             "Description (optional)",

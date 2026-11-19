@@ -234,7 +234,6 @@ enum Msg {
     Comment(String),
     AskMerge(u64),
     WriteOpen,
-    WriteRepo(String),
     WriteTitle(String),
     WriteBody(String),
     Open(String),
@@ -771,20 +770,15 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             app.fixing = None;
         }
         Msg::WriteOpen => {
-            let repos = repos_of(app);
+            // New issue は、ボードを出している repository にだけ出す
+            let Some(repo) = board_repo(app) else {
+                return Task::none();
+            };
             app.notice = None;
             app.write = Some(Write {
-                repo: match &app.page {
-                    Page::Repo(repo) => Some(repo.clone()),
-                    _ => (repos.len() == 1).then(|| repos[0].clone()),
-                },
+                repo: Some(repo),
                 ..Write::default()
             });
-        }
-        Msg::WriteRepo(repo) => {
-            if let Some(w) = &mut app.write {
-                w.repo = Some(repo);
-            }
         }
         Msg::WriteTitle(t) => {
             if let Some(w) = &mut app.write {

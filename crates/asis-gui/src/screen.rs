@@ -3,11 +3,6 @@
 use super::*;
 use iced::widget::{column, row};
 
-/// 開いている部屋の repo
-pub fn repos_of(app: &App) -> Vec<String> {
-    views(app).iter().map(|v| v.repo.clone()).collect()
-}
-
 /// いま出すページ。読み直しで無くなったもの(外した repository・外れた人)を指していたら、1 つ上に戻す
 pub fn page_of(app: &App) -> Page {
     let room = panels::open_room(app);
