@@ -409,10 +409,18 @@ fn welcome(app: &App) -> Element<'_, Msg> {
 
 fn sign_in_button(app: &App) -> Element<'_, Msg> {
     if app.signing_in {
-        cap(app.t(
-            "ブラウザで GitHub のログインを待っています…(5 分まで)",
-            "Waiting for GitHub sign-in in your browser… (up to 5 minutes)",
-        ))
+        column![
+            cap(app.t(
+                "ブラウザで GitHub のログインを待っています…(5 分まで)",
+                "Waiting for GitHub sign-in in your browser… (up to 5 minutes)",
+            )),
+            cap(app.t(
+                "開いたブラウザが GitHub に入っていないときは、リンクをコピーして、入っているブラウザに貼ります。",
+                "If the browser that opened is not signed in to GitHub, copy the link and paste it into the one that is.",
+            )),
+            row![seg("Copy sign-in link".into(), false, Msg::CopySignIn)],
+        ]
+        .spacing(8)
         .into()
     } else {
         row![primary(

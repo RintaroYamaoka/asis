@@ -128,6 +128,8 @@ struct App {
     /// 操作を GitHub に送っている最中
     busy: bool,
     loading: bool,
+    /// Sign in のリンク(待っている間だけ)。開いたブラウザが GitHub に入っていないときに、別のブラウザへ貼る用
+    sign_url: Arc<Mutex<Option<String>>>,
     /// 読み込みの最中に読み直しを頼まれた。今のが終わったら、もう 1 回 読む
     again: bool,
     /// 読み直しの合図の番号。最後に出した合図だけを受ける(合図が増えていかないように)
@@ -181,6 +183,7 @@ enum Msg {
     SignIn,
     SignedIn(Result<(), String>),
     SignOut,
+    CopySignIn,
     Accent(String),
     Lang(bool),
     SaveDb,
@@ -325,6 +328,7 @@ fn boot() -> (App, Task<Msg>) {
         busy: false,
         loading: true,
         again: false,
+        sign_url: Arc::default(),
         tick: 0,
         bar: chrome::Bar::default(),
         synced: None,
@@ -337,7 +341,8 @@ fn boot() -> (App, Task<Msg>) {
         form: Form::default(),
         want_room: None,
         confirm_delete: false,
-        signing_in: false,
+        // 作るとき用:Sign in を待っている画面を出した状態で開く(`ASIS_SIGNING=1`。debug のみ)
+        signing_in: cfg!(debug_assertions) && std::env::var_os("ASIS_SIGNING").is_some(),
         db_url: local.db.map(|d| d.url),
     };
     (app, Task::batch([check_gh(), load(loader, true)]))
@@ -486,10 +491,34 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             }
             app.signing_in = true;
             app.notice = None;
+            let slot = app.sign_url.clone();
+            if let Ok(mut url) = slot.lock() {
+                *url = None;
+            }
             return Task::perform(
-                async move { asis::room::sign_in(&db, &|_| {}) },
+                async move {
+                    asis::room::sign_in(&db, &|url| {
+                        if let Ok(mut slot) = slot.lock() {
+                            *slot = Some(url.to_string());
+                        }
+                    })
+                },
                 Msg::SignedIn,
             );
+        }
+        Msg::CopySignIn => {
+            let url = app.sign_url.lock().ok().and_then(|url| url.clone());
+            if let Some(url) = url {
+                app.notice = Some((
+                    app.t(
+                        "リンクをコピーしました。GitHub に入っているブラウザに貼ってください",
+                        "Link copied. Paste it into the browser where you are signed in to GitHub",
+                    )
+                    .into(),
+                    true,
+                ));
+                return iced::clipboard::write(url);
+            }
         }
         Msg::SignedIn(result) => {
             app.signing_in = false;
