@@ -153,7 +153,11 @@ PR ごとに、次の表を上から順に当てて最初に当たった行で�
 出すものは 1 つ。最初に開くのは、プロジェクトの今。個人のやることの一覧を別の画面にしない(見せるのは開発の今であって、個人の受信箱ではない)。
 
 - 今 動いているものを全部 出す。タスクを状態ごとに並べる。
-- 見せ方は 2 つ。最初に出すのはボード(状態が列)。リスト(状態が束)に切り替えられる。中身は同じ。ボードのカードは動かせない(列は GitHub の事実で決まる)。
+- 見せ方は 2 つ。中身は同じで、**issue 1 件 = 1 行、動いている PR = カード**。カードは動かせない(列は GitHub の事実で決まる)。
+  - **Board**(最初に出す): 左に issue の一覧、右に Pull requests。左は開いている issue を全部(PR がまだ無いものも、進んでいるものも。件数つき)。`Open / Closed` で、終わったもの(issue が閉じていて、終わっていない PR が無いもの)に切り替える。右は状態の列(In progress / In review / Merged)で、PR のある issue の段を開いた形。PR もブランチもまだ無い issue は、左の一覧にだけ出す。
+  - **List**: 状態の束(In review → Merged → In progress → No PR yet)に 1 件 1 行。全部たたんだ形。行の頭の印で、その場にその issue の段(カード)が開く。
+  - 段の開け閉めは 1 件ずつできる(←→)。Board と List を切り替えると、開け閉めは忘れる。
+  - 左の一覧の名前は Issues。文書に書いたタスク(§4 の差し込み口)が 1 つでもあれば、issue ではないので Plans。
 - 行には段階の言葉を 1 つ付ける。タスクにも、タスクにつながっていない PR にも同じ言葉を使う:直しが要る・確認待ち・取り込める・チェック中・本番待ち・閉じ忘れ・実装中・やること。タスクは §6 の状態から決め、つながる PR に直し待ちが 1 本でもあれば「直しが要る」にする。
 - タスクにつながっていない PR は、別の段にまとめて出す。issue が 1 件も無くても、この段に全部の PR が並ぶ。
 - つながる先を書いていても、その issue を読めていない PR(古く閉じた issue・別の repo の issue を指すもの)は、この段に出す。黙って消さない。
@@ -205,7 +209,7 @@ Appearance(1 色・説明の文の言葉)/ Account(gh の名前・部屋の Sign
 
 | 何の言葉か | 画面に出す言葉 |
 |---|---|
-| タスクの状態(ボードの列) | Todo / In progress / In review / Merged(本番に出たのに issue が開いているものは Deployed · issue open) |
+| タスクの状態(PR の列と、リストの束) | In progress / In review / Merged。PR がまだ無いものは No PR yet(本番に出たのに issue が開いているものは Deployed · issue open)。終わったものは Closed |
 | PR の状態 | Draft / Review required / Changes requested / Checks failing / Checks pending / Merge conflict / Unresolved comment / Approved / Merged / Deployed / Closed |
 | 操作 | Approve / Request changes / Merge(2 回目は Confirm merge) |
 | 役割 | Review / Merge / Deploy |

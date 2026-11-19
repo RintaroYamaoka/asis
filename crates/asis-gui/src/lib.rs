@@ -148,6 +148,12 @@ struct App {
     area: Area,
     page: Page,
     look: Look,
+    /// 人が開け閉めした段(true = 開いている)。Board / List を切り替えると、忘れる
+    fold: std::collections::HashMap<Key, bool>,
+    /// issue につながっていない PR の束を、人が開け閉めしたか
+    fold_loose: Option<bool>,
+    /// Board の左の一覧で、Closed を出しているか
+    closed_tab: bool,
     /// Claude Code の手順書が、仕事場に入っているか
     skill: bool,
     /// 手元の clone を探すフォルダ(設定)
@@ -233,6 +239,11 @@ enum Msg {
     Go(Page),
     Area(Area),
     Look(Look),
+    /// 段を開け閉めする
+    Fold(Key),
+    FoldLoose,
+    /// Board の左の一覧を、Open か Closed に
+    IssuesTab(bool),
     SkillInstall,
     AddRoot,
     DropRoot(String),
@@ -360,6 +371,9 @@ fn boot() -> (App, Task<Msg>) {
         area: Area::Room,
         page: Page::Repos,
         look: Look::Board,
+        fold: std::collections::HashMap::new(),
+        fold_loose: None,
+        closed_tab: false,
         skill: asis::skill::installed(),
         roots: local.roots.clone(),
         selected: None,
@@ -427,7 +441,21 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                             .map(|m| m.github_id);
                         let set = |t| Area::Settings(t);
                         match std::env::var("ASIS_POP").as_deref() {
-                            Ok("board") => app.page = first.map_or(Page::Repos, Page::Repo),
+                            Ok("board") => {
+                                // `ASIS_REPO=名前の一部` でその repository、`ASIS_LOOK=list`、`ASIS_TAB=closed`
+                                let want = std::env::var("ASIS_REPO").ok();
+                                let repo = views(app)
+                                    .iter()
+                                    .map(|v| v.repo.clone())
+                                    .find(|r| want.as_deref().is_some_and(|w| r.contains(w)))
+                                    .or(first);
+                                app.page = repo.map_or(Page::Repos, Page::Repo);
+                                if std::env::var("ASIS_LOOK").as_deref() == Ok("list") {
+                                    app.look = Look::List;
+                                }
+                                app.closed_tab =
+                                    std::env::var("ASIS_TAB").as_deref() == Ok("closed");
+                            }
                             Ok("rset") => app.page = first.map_or(Page::Repos, Page::RepoSettings),
                             Ok("members") => app.page = Page::Members,
                             Ok("member") => app.page = who.map_or(Page::Members, Page::Member),
@@ -702,7 +730,13 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 app.skill = asis::skill::installed();
             }
         }
-        Msg::Look(look) => app.look = look,
+        Msg::Look(look) => set_look(app, look),
+        Msg::Fold(key) => {
+            let now = fold_state(app.fold.get(&key).copied(), app.look);
+            app.fold.insert(key, !now);
+        }
+        Msg::FoldLoose => app.fold_loose = Some(!fold_state(app.fold_loose, app.look)),
+        Msg::IssuesTab(closed) => app.closed_tab = closed,
         Msg::SkillInstall => match asis::skill::install() {
             Ok(dir) => {
                 app.skill = true;
@@ -864,9 +898,21 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 KeyCode::Character("k") => step(app, -1),
                 KeyCode::Character("c") => return update(app, Msg::WriteOpen),
                 KeyCode::Character("v") => {
-                    app.look = match app.look {
+                    let next = match app.look {
                         Look::Board => Look::List,
                         Look::List => Look::Board,
+                    };
+                    set_look(app, next);
+                }
+                // 選んでいる段を開く・たたむ
+                KeyCode::Named(Named::ArrowRight) => {
+                    if let Some(key) = app.selected.clone() {
+                        app.fold.insert(key, true);
+                    }
+                }
+                KeyCode::Named(Named::ArrowLeft) => {
+                    if let Some(key) = app.selected.clone() {
+                        app.fold.insert(key, false);
                     }
                 }
                 KeyCode::Character("r") if !app.loading => {
@@ -951,6 +997,13 @@ fn run_op(op: Op) -> Result<String, String> {
 }
 
 /// 書きかけの操作を忘れる(別の 1 件に移ったとき・閉じたとき)
+/// Board と List を切り替える。1 件ずつの開け閉めは忘れる(Board = 開いた形、List = たたんだ形から始める)
+fn set_look(app: &mut App, look: Look) {
+    app.look = look;
+    app.fold.clear();
+    app.fold_loose = None;
+}
+
 fn forget(app: &mut App) {
     app.fixing = None;
     app.confirm = None;

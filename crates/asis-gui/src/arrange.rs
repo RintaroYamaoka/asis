@@ -4,6 +4,8 @@ use super::*;
 
 /// ボードの列。段階を 4 つにまとめる
 pub const COLUMNS: [&str; 4] = ["Todo", "In progress", "In review", "Merged"];
+/// PR のカードを並べる列。まだ PR が無いものは、列ではなく行で出す
+pub const PR_COLUMNS: [&str; 3] = ["In progress", "In review", "Merged"];
 /// リストで束を並べる順(人の手が要る順)
 pub const LIST_ORDER: [usize; 4] = [2, 3, 1, 0];
 
@@ -107,13 +109,65 @@ pub fn column_of_pr(mark: &str) -> Option<usize> {
     }
 }
 
+/// PR 1 本が入る列(`PR_COLUMNS` の何番目か)
+pub fn pr_column(mark: &str) -> Option<usize> {
+    column_of_pr(mark).map(|c| c - 1)
+}
+
+/// 束の名前。まだ PR が無いものは、状態の名前ではなく、そのことを言う
+pub fn state_name(column: usize) -> &'static str {
+    match column {
+        0 => "No PR yet",
+        i => COLUMNS[i],
+    }
+}
+
+/// 1 件の、今の状態の言葉(Board の左の一覧に出す)
+pub fn state_word(stage: Stage) -> &'static str {
+    state_name(column_of(stage))
+}
+
+/// 一覧の名前。issue だけなら Issues。文書に書いたタスクが 1 つでもあれば、issue ではないので Plans
+pub fn list_name(kinds: impl Iterator<Item = Kind>) -> &'static str {
+    if kinds.into_iter().any(|k| k == Kind::Doc) {
+        "Plans"
+    } else {
+        "Issues"
+    }
+}
+
+/// その段を開いているか。カードが無ければ、開くものが無い。
+/// 人が開け閉めしていなければ、Board は開いた形・List はたたんだ形
+pub fn opened(app: &App, key: &Key, has_cards: bool) -> bool {
+    has_cards && fold_state(app.fold.get(key).copied(), app.look)
+}
+
+pub fn fold_state(by_hand: Option<bool>, look: Look) -> bool {
+    by_hand.unwrap_or(look == Look::Board)
+}
+
+/// いまボードを出している repository の、終わったタスク
+pub fn closed_items(app: &App) -> Vec<Item<'_>> {
+    let Some(repo) = board_repo(app) else {
+        return Vec::new();
+    };
+    views(app)
+        .into_iter()
+        .filter(|v| v.repo == repo)
+        .flat_map(|v| v.closed.iter().map(move |r| (v, r)))
+        .collect()
+}
+
 pub fn key_of(view: &RepoView, row: &Row) -> Key {
     (view.repo.clone(), row.kind, row.number, row.title.clone())
 }
 
 pub fn current(app: &App) -> Option<Item<'_>> {
     let sel = app.selected.as_ref()?;
-    items(app).into_iter().find(|(v, r)| key_of(v, r) == *sel)
+    items(app)
+        .into_iter()
+        .chain(closed_items(app))
+        .find(|(v, r)| key_of(v, r) == *sel)
 }
 
 /// 上下キーで、次の 1 件へ。issue の段 → つながっていない PR、の順
@@ -171,26 +225,47 @@ pub fn label_of(row: &Row) -> String {
     }
 }
 
-/// いま番を持っている PR の題。issue が漠然としていても、何で止まっているかが分かる
-pub fn now_of(row: &Row) -> String {
-    if !matches!(row.kind, Kind::Task | Kind::Doc) {
-        return row
-            .local
-            .first()
-            .map(|l| l.branch.clone())
-            .unwrap_or_default();
-    }
-    row.prs
-        .iter()
-        .find(|p| !p.turn.is_empty())
-        .map(|p| p.title.clone())
-        .unwrap_or_default()
-}
-
 /// PR の札に出す言葉。GitHub が使っている言葉のまま
 pub fn word_of(p: &asis::view::PrLine) -> String {
     match p.mark {
         "↑" => "Merged".to_string(),
         _ => p.why.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lane_starts_open_on_the_board_and_folded_in_the_list_until_someone_toggles_it() {
+        assert!(fold_state(None, Look::Board));
+        assert!(!fold_state(None, Look::List));
+        // 人が開け閉めしたら、そちらに従う
+        assert!(!fold_state(Some(false), Look::Board));
+        assert!(fold_state(Some(true), Look::List));
+    }
+
+    #[test]
+    fn pull_requests_sit_in_three_columns_and_the_rest_is_named_by_what_is_missing() {
+        assert_eq!(pr_column("…"), Some(0));
+        assert_eq!(pr_column("!"), Some(0));
+        assert_eq!(pr_column("?"), Some(1));
+        assert_eq!(pr_column("+"), Some(1));
+        assert_eq!(pr_column("↑"), Some(2));
+        // 本番に出た・閉じた PR は、列に置かない
+        assert_eq!(pr_column("✓"), None);
+        assert_eq!(PR_COLUMNS[pr_column("?").unwrap()], "In review");
+        assert_eq!(state_word(Stage::Todo), "No PR yet");
+        assert_eq!(state_word(Stage::Doing), "In progress");
+        assert_eq!(state_word(Stage::InReview), "In review");
+        assert_eq!(state_word(Stage::AwaitingShip), "Merged");
+    }
+
+    #[test]
+    fn the_list_is_called_issues_unless_a_task_comes_from_a_document() {
+        assert_eq!(list_name([Kind::Task, Kind::Task].into_iter()), "Issues");
+        assert_eq!(list_name([].into_iter()), "Issues");
+        assert_eq!(list_name([Kind::Task, Kind::Doc].into_iter()), "Plans");
     }
 }

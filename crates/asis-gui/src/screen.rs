@@ -291,7 +291,7 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
         cap("Tab Next repository"),
         cap("V Board / List"),
         cap("Enter Open"),
-        cap("←→ Prev / Next PR"),
+        cap("←→ Fold · Prev / Next PR"),
         cap("C New issue"),
         cap("R Refresh"),
         cap("Esc Close"),
