@@ -387,6 +387,9 @@ fn welcome(app: &App) -> Element<'_, Msg> {
                 .spacing(10)
                 .into()
             ),
+            if !skill_offered() {
+                Space::new().into()
+            } else {
             choice(
                 column![
                     text(app.t("3. Claude をつなぐ", "3. Connect Claude")).size(15).color(TEXT),
@@ -402,7 +405,8 @@ fn welcome(app: &App) -> Element<'_, Msg> {
                 ]
                 .spacing(10)
                 .into()
-            ),
+            )
+            },
             notice_line(app),
         ]
         .spacing(18)

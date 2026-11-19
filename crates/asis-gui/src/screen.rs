@@ -196,16 +196,18 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
         Some(tab) => {
             let go =
                 |label: &str, x: SetTab| nav(label, None, tab == x, Msg::Area(Area::Settings(x)));
-            column![
+            let mut side = column![
                 title("Settings".into()),
                 go("Appearance", SetTab::Look),
                 go("Account", SetTab::Account),
-                go("Claude", SetTab::Claude),
-                go("Local work", SetTab::Local),
-                go("Database", SetTab::Db),
-                go("About", SetTab::About),
-            ]
-            .into()
+            ];
+            if skill_offered() {
+                side = side.push(go("Claude", SetTab::Claude));
+            }
+            side.push(go("Local work", SetTab::Local))
+                .push(go("Database", SetTab::Db))
+                .push(go("About", SetTab::About))
+                .into()
         }
         None => {
             let mut side = column![title(
@@ -254,15 +256,18 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
     match update_outcome() {
         Some(asis::update::Outcome::Ready(version)) => {
             errors = errors.push(
-                text(if app.english {
-                    format!(
-                        "Version {version} is installed. It starts the next time you open AsIs."
-                    )
-                } else {
-                    format!("版 {version} を入れました。次に AsIs を開くと、その版で動きます。")
-                })
-                .size(13)
-                .color(DIM),
+                row![
+                    text(if app.english {
+                        format!("Version {version} is installed. It starts the next time you open AsIs.")
+                    } else {
+                        format!("版 {version} を入れました。次に AsIs を開くと、その版で動きます。")
+                    })
+                    .size(13)
+                    .color(TEXT),
+                    seg("Restart now".into(), false, Msg::Restart),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
             );
         }
         Some(asis::update::Outcome::Blocked(e)) => {
