@@ -65,7 +65,7 @@ repo の中には何も置かない。ファイルを置かせるのは、入れ
 | 部屋を作る | GitHub でログインして、名前を付ける。作った人が管理者になる |
 | repo を登録する | 管理者が、部屋に repo を足す |
 | メンバーを招待する | 管理者が、GitHub のアカウント名で足す。相手は次に開いたとき、部屋が出る |
-| 役割を決める | 管理者が、招くときに付ける。部屋を作った人は、確認・取り込み・本番の役を全部 持って始まる(過去の事実から初期値を出す案は未決。§11) |
+| 役割を決める | 役は 5 つ(Plan・Implement・Review・Merge・Deploy)と Admin。管理者が、招くときに付ける。部屋を作った人は、確認・取り込み・本番の役を全部 持って始まる(過去の事実から初期値を出す案は未決。§11) |
 | 出る・外す | 自分は自分で出られる。管理者はメンバーを外せる |
 
 部屋のメンバーが、その部屋で出す人になる。メンバーでない人の PR は出さない。ただし、メンバーが GitHub で確認を頼まれている PR は出す(番が来ているものは隠さない)。repo ごとに「全員の分を出す」を選べる。
@@ -145,6 +145,7 @@ PR ごとに、次の表を上から順に当てて最初に当たった行で�
 
 - 取り下げた PR は、無かったものとして扱う。
 - タスクの番 = 束の中で番が付いている PR の番。複数あれば全員。PR がまだ無いタスクは、担当の番(担当が居なければ、誰の番でもない)。
+- 事実から番が決まらないときだけ、役の人に回す。まだ誰も始めていないタスク(PR もブランチも担当も無い)は **Implement** の役の人。全部 本番に出たのに開いたままのタスクは **Plan** の役の人(確かめて閉じる)。役の人が居なければ、今までどおり誰の番でもない。
 - issue が閉じているのに開いた PR が残っているときは、ずれとして出す。
 - 人も AI も、状態を直接 変えられない。
 
@@ -212,7 +213,7 @@ Appearance(1 色・説明の文の言葉)/ Account(gh の名前・部屋の Sign
 | タスクの状態(PR の列と、リストの束) | In progress / In review / Merged。PR がまだ無いものは No PR yet(本番に出たのに issue が開いているものは Deployed · issue open)。終わったものは Closed |
 | PR の状態 | Draft / Review required / Changes requested / Checks failing / Checks pending / Merge conflict / Unresolved comment / Approved / Merged / Deployed / Closed |
 | 操作 | Approve / Request changes / Merge(2 回目は Confirm merge) |
-| 役割 | Review / Merge / Deploy |
+| 役割 | Plan / Implement / Review / Merge / Deploy |
 
 §5・§6 の表は規則の説明なので日本語で書いてある。画面に出るときは上の言葉になる。
 

@@ -37,7 +37,7 @@ reset role; insert into public.room_creators (github_id) values (101); set role 
 
 -- alice が部屋を作る。本人が管理者で、全部の役を持つ
 insert into pg_temp.ids select public.create_room('team');
-select pg_temp.count_is($$select 1 from public.room_members where login='alice' and is_admin and review and merge and deploy$$, 1);
+select pg_temp.count_is($$select 1 from public.room_members where login='alice' and is_admin and plan and implement and review and merge and deploy$$, 1);
 
 -- 表に直接 入れて部屋を作ることはできない
 select pg_temp.fails($$insert into public.rooms (name) values ('raw')$$, '42501');
@@ -126,7 +126,9 @@ reset role; set role anon;
 select pg_temp.fails('select 1 from public.app_releases', '42501');
 reset role;
 select pg_temp.count_is($$select 1 from storage.objects where bucket_id = 'releases' and name = 'demo/0.2.0/a.exe'$$, 1);
-select pg_temp.count_is($$select 1 from public.schema_migrations$$, 6);
+select pg_temp.count_is($$select 1 from public.schema_migrations$$, 7);
+-- 招かれた人は、役なしで始まる(計画・実装も)
+select pg_temp.count_is($$select 1 from public.room_members where github_id = 102 and not plan and not implement$$, 1);
 set role authenticated;
 
 -- 最後の管理者は出られない・降りられない

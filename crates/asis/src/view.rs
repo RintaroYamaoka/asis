@@ -7,7 +7,7 @@ use crate::local::Work;
 use asis_core::facts::*;
 use asis_core::link::{link_all, ref_in_branch};
 use asis_core::pr::{judge_pr, PrState, PrVerdict, Reason};
-use asis_core::task::{judge_task, TaskState};
+use asis_core::task::{judge_task_in, TaskState};
 use std::collections::BTreeMap;
 
 pub struct RepoView {
@@ -240,6 +240,8 @@ pub fn build(
     };
     let settings = Settings {
         members,
+        plan: project.plan.clone(),
+        implement: project.implement.clone(),
         review: project.review.clone(),
         merge: project.merge.clone(),
         deploy: project.deploy.clone(),
@@ -324,7 +326,7 @@ pub fn build(
         // このタスクの worktree = 番号で始まるブランチか、つながる開いた PR のブランチ。
         let local = local_for(&|b| numbered(b) || idx.iter().any(|i| open_branch(*i) == Some(b)));
         let has_branch = !local.is_empty() || f.branches.iter().any(|b| numbered(b));
-        let t = judge_task(issue, &vs, has_branch);
+        let t = judge_task_in(issue, &vs, has_branch, &settings);
         // 起票した人・担当・つながる PR の作者か確認を頼まれた人の、どれかが当たれば出す。
         let related = wanted(&issue.author)
             || issue.assignees.iter().any(|a| wanted(a))
@@ -386,7 +388,12 @@ pub fn build(
             assignees: vec![],
             body: t.body.clone(),
         };
-        let v = judge_task(&as_issue, &vs, !local.is_empty() || !t.branches.is_empty());
+        let v = judge_task_in(
+            &as_issue,
+            &vs,
+            !local.is_empty() || !t.branches.is_empty(),
+            &settings,
+        );
         // PR がまだ無いものは誰のものでもないので出す。PR があれば、PR で絞る
         if !idx.is_empty() && !idx.iter().any(|i| wanted_pr(&f.prs[*i])) {
             continue;

@@ -62,9 +62,74 @@ pub fn judge_task(issue: &IssueFacts, prs: &[PrVerdict], has_branch: bool) -> Ta
     }
 }
 
+/// 役の人に番を回す。事実から番が決まらないときだけ(担当が居る・PR の番がある、を上書きしない)。
+/// - まだ誰も始めていない(PR もブランチも担当も無い)→ 実装する人
+/// - 全部 本番に出たのに issue が開いている → 計画する人(確かめて閉じる)
+pub fn judge_task_in(
+    issue: &IssueFacts,
+    prs: &[PrVerdict],
+    has_branch: bool,
+    settings: &Settings,
+) -> TaskVerdict {
+    let mut verdict = judge_task(issue, prs, has_branch);
+    if verdict.turn.is_empty() {
+        verdict.turn = match verdict.state {
+            TaskState::Todo => settings.implement.clone(),
+            TaskState::ShippedOpen => settings.plan.clone(),
+            _ => Vec::new(),
+        };
+        verdict.turn.sort();
+        verdict.turn.dedup();
+    }
+    verdict
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roles_take_the_turn_only_when_the_facts_name_nobody() {
+        let team = Settings {
+            members: vec![],
+            plan: vec!["pat".into()],
+            implement: vec!["ivy".into(), "ian".into()],
+            review: vec![],
+            merge: vec![],
+            deploy: vec![],
+            merged_is_shipped: false,
+        };
+        let turn = |i: &IssueFacts, prs: &[PrVerdict], branch: bool| {
+            judge_task_in(i, prs, branch, &team).turn
+        };
+        // まだ誰も始めていない → 実装する人
+        assert_eq!(turn(&issue(true), &[], false), vec!["ian", "ivy"]);
+        // 担当が居れば、担当のまま
+        let mut mine = issue(true);
+        mine.assignees = vec!["ann".into()];
+        assert_eq!(turn(&mine, &[], false), vec!["ann"]);
+        // ブランチがあれば、もう誰かが始めている。役の人に回さない
+        assert!(turn(&issue(true), &[], true).is_empty());
+        // 全部 本番に出たのに開いている → 計画する人
+        assert_eq!(
+            turn(&issue(true), &[v(PrState::Shipped, &[])], false),
+            vec!["pat"]
+        );
+        // PR の番があれば、そのまま
+        assert_eq!(
+            turn(&issue(true), &[v(PrState::InReview, &["bob"])], false),
+            vec!["bob"]
+        );
+        // 役の人が居なければ、今までどおり誰の番でもない
+        let none = Settings {
+            plan: vec![],
+            implement: vec![],
+            ..team.clone()
+        };
+        assert!(judge_task_in(&issue(true), &[], false, &none)
+            .turn
+            .is_empty());
+    }
 
     fn issue(open: bool) -> IssueFacts {
         IssueFacts {

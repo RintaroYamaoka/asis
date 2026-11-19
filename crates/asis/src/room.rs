@@ -18,6 +18,12 @@ pub struct Member {
     pub github_id: i64,
     pub login: String,
     pub is_admin: bool,
+    /// 計画する(issue を書く・終わったものを閉じる)
+    #[serde(default)]
+    pub plan: bool,
+    /// 実装する
+    #[serde(default)]
+    pub implement: bool,
     pub review: bool,
     pub merge: bool,
     pub deploy: bool,
@@ -55,7 +61,7 @@ struct RawRoom {
 
 /// 部屋の一覧を聞くときの問い合わせ
 const ROOMS: &str = "/rest/v1/rooms?select=id,name,merge_by_author,deploy_by_author,ignore_checks,\
-room_repos(repo,everyone),room_members(github_id,login,is_admin,review,merge,deploy)&order=created_at";
+room_repos(repo,everyone),room_members(github_id,login,is_admin,plan,implement,review,merge,deploy)&order=created_at";
 
 /// 部屋の名前として使える形にする(DB の決まりと同じ: 1〜80 字)
 pub fn room_name(name: &str) -> Result<String, String> {
@@ -137,6 +143,8 @@ impl Room {
             name: self.name.clone(),
             repos: self.repos.clone(),
             members: self.members.iter().map(|m| m.login.clone()).collect(),
+            plan: self.role(|m| m.plan, false),
+            implement: self.role(|m| m.implement, false),
             review: self.role(|m| m.review, false),
             merge: self.role(|m| m.merge, self.merge_by_author),
             deploy: self.role(|m| m.deploy, self.deploy_by_author),
@@ -753,6 +761,8 @@ impl Client {
 /// 部屋の中の役割
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
+    Plan,
+    Implement,
     Review,
     Merge,
     Deploy,
@@ -760,10 +770,20 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 4] = [Role::Review, Role::Merge, Role::Deploy, Role::Admin];
+    /// 仕事の流れの順
+    pub const ALL: [Role; 6] = [
+        Role::Plan,
+        Role::Implement,
+        Role::Review,
+        Role::Merge,
+        Role::Deploy,
+        Role::Admin,
+    ];
 
     fn column(self) -> &'static str {
         match self {
+            Role::Plan => "plan",
+            Role::Implement => "implement",
             Role::Review => "review",
             Role::Merge => "merge",
             Role::Deploy => "deploy",
@@ -773,6 +793,8 @@ impl Role {
 
     pub fn label(self) -> &'static str {
         match self {
+            Role::Plan => "Plan",
+            Role::Implement => "Implement",
             Role::Review => "Review",
             Role::Merge => "Merge",
             Role::Deploy => "Deploy",
@@ -782,6 +804,8 @@ impl Role {
 
     pub fn of(self, m: &Member) -> bool {
         match self {
+            Role::Plan => m.plan,
+            Role::Implement => m.implement,
             Role::Review => m.review,
             Role::Merge => m.merge,
             Role::Deploy => m.deploy,
@@ -989,7 +1013,7 @@ const HELP: &str = "asis room — 部屋(repo・メンバー・役割をまと�
                                           --everyone を付けると、メンバーでない人の分も出す(足し直せば切り替わる)
   asis room drop <部屋> <owner/repo>      repo を外す
   asis room invite <部屋> <名前> [役割]   GitHub のアカウント名で招く。入っている人なら役割を変える
-                                          役割: --review --merge --deploy --admin
+                                          役割: --plan --implement --review --merge --deploy --admin
   asis room kick <部屋> <名前>            メンバーを外す
   asis room rename <部屋> <新しい名前>    部屋の名前を変える
   asis room leave <部屋>                  自分が出る
@@ -1024,13 +1048,15 @@ pub fn rooms_text(rooms: &[Room]) -> String {
         if room.repos.is_empty() {
             out.push_str("  repo      (まだありません)\n");
         }
-        out.push_str("  メンバー                 Review Merge Deploy Admin\n");
+        out.push_str("  メンバー                 Plan Implement Review Merge Deploy Admin\n");
         for m in &room.members {
             let pad = 22usize.saturating_sub(m.login.chars().count());
             out.push_str(&format!(
-                "    {}{}  {}      {}     {}      {}\n",
+                "    {}{}  {}    {}         {}      {}     {}      {}\n",
                 m.login,
                 " ".repeat(pad),
+                yes(m.plan),
+                yes(m.implement),
                 yes(m.review),
                 yes(m.merge),
                 yes(m.deploy),
@@ -1078,7 +1104,16 @@ pub fn cli(args: &[String]) -> Result<(), String> {
     let flag = |name: &str| args.iter().any(|a| a == name);
     if let Some(bad) = args.iter().find(|a| {
         a.starts_with("--")
-            && !["--review", "--merge", "--deploy", "--admin", "--everyone"].contains(&a.as_str())
+            && ![
+                "--plan",
+                "--implement",
+                "--review",
+                "--merge",
+                "--deploy",
+                "--admin",
+                "--everyone",
+            ]
+            .contains(&a.as_str())
     }) {
         return Err(format!("知らない指定です: {bad}\n\n{HELP}"));
     }

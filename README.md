@@ -56,7 +56,7 @@ repo・メンバー・役割を人と共有するときは、部屋を使う。�
 asis login                                  # GitHub でログインする(本人確認だけ。repo を読む許可は求めない)
 asis room new team                          # 部屋を作る。作った人が管理者
 asis room add team owner/api                # repo を足す
-asis room invite team alice --review        # GitHub のアカウント名で招く。役割: --review --merge --deploy --admin
+asis room invite team alice --review        # GitHub のアカウント名で招く。役割: --plan --implement --review --merge --deploy --admin
 asis room ignore team Preview               # 状態を決めるときに数えないチェック
 asis room                                   # 入っている部屋を出す
 ```

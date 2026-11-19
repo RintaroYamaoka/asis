@@ -586,6 +586,14 @@ fn member(app: &App, id: i64) -> Element<'_, Msg> {
         .map(|role| {
             let on = role.of(m);
             let note = match role {
+                Role::Plan => app.t(
+                    "本番に出たのに開いたままの issue が、この人の番になります(確かめて閉じる)",
+                    "Issues that are deployed but still open wait on this member (to check and close)",
+                ),
+                Role::Implement => app.t(
+                    "まだ誰も始めていない issue(PR も担当も無い)が、この人の番になります",
+                    "Issues nobody has started (no PR, no assignee) wait on this member",
+                ),
                 Role::Review => app.t(
                     "Review required の PR が、この人の番になります",
                     "PRs that need review wait on this member",
