@@ -39,6 +39,9 @@ static READER: OnceLock<Option<Arc<dyn asis::extra::Reader>>> = OnceLock::new();
 static UPDATE: Mutex<Option<asis::update::Outcome>> = Mutex::new(None);
 /// 画面に出す版。配る側が渡した版、無ければこの部品の版
 static VERSION: OnceLock<String> = OnceLock::new();
+/// 開いて最初に確かめた結果を、窓が 1 回だけ受け取る口
+static FIRST_CHECK: Mutex<Option<std::sync::mpsc::Receiver<asis::update::Outcome>>> =
+    Mutex::new(None);
 
 /// 手順書(issue の番号でブランチを切る決まり)を入れる所を、画面に出さない。
 /// 別の決まりで作業している人に配るとき、起こす側が先に呼ぶ(入れると、その人の付け方とぶつかる)
@@ -204,6 +207,8 @@ struct App {
     /// 自分で描く上の帯(WSL のとき)
     bar: chrome::Bar,
     synced: Option<Instant>,
+    /// この窓を開いた時刻
+    started: Instant,
     error: Option<String>,
     accent: Color,
     /// 説明の文を英語で出すか(大事な単語は、どちらでも英語)
@@ -281,6 +286,8 @@ enum Msg {
     Refresh,
     /// 入れ替えた新しい版で、開き直す
     Restart,
+    /// 開いて最初に、新しい版を確かめた結果
+    UpdateChecked(asis::update::Outcome),
     Again(u64),
     Key(keyboard::Event),
 }
@@ -413,6 +420,7 @@ fn boot() -> (App, Task<Msg>) {
         tick: 0,
         bar: chrome::Bar::default(),
         synced: None,
+        started: Instant::now(),
         error: None,
         accent,
         english,
@@ -426,7 +434,15 @@ fn boot() -> (App, Task<Msg>) {
         signing_in: cfg!(debug_assertions) && std::env::var_os("ASIS_SIGNING").is_some(),
         db_url: local.db.map(|d| d.url),
     };
-    (app, Task::batch([check_gh(), load(loader, true)]))
+    let mut tasks = vec![check_gh(), load(loader, true)];
+    // 新しい版を確かめている最中なら、最初の結果を待つ
+    if let Some(heard) = FIRST_CHECK.lock().ok().and_then(|mut slot| slot.take()) {
+        tasks.push(Task::perform(
+            async move { heard.recv().unwrap_or(asis::update::Outcome::Nothing) },
+            Msg::UpdateChecked,
+        ));
+    }
+    (app, Task::batch(tasks))
 }
 
 fn update(app: &mut App, msg: Msg) -> Task<Msg> {
@@ -725,18 +741,24 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             app.loading = true;
             return load(app.loader.clone(), true);
         }
-        Msg::Restart => {
-            // 同じ場所の実行ファイル(もう新しい版に入れ替わっている)を、同じ引数で起こしてから閉じる
-            let started = std::env::current_exe().and_then(|exe| {
-                std::process::Command::new(exe)
-                    .args(std::env::args_os().skip(1))
-                    .spawn()
-            });
-            match started {
-                Ok(_) => return iced::exit(),
-                Err(e) => {
-                    asis::log::line(&format!("restart: {e}"));
-                    app.notice = Some((e.to_string(), false));
+        Msg::Restart => match start_again() {
+            Ok(()) => return iced::exit(),
+            Err(e) => {
+                asis::log::line(&format!("restart: {e}"));
+                app.notice = Some((e.to_string(), false));
+            }
+        },
+        Msg::UpdateChecked(outcome) => {
+            // 開いた直後で、何も開いていない・書いていないときだけ、聞かずに開き直す
+            let idle = !app.open && app.write.is_none() && app.pop.is_none() && !app.busy;
+            if matches!(outcome, asis::update::Outcome::Ready(_))
+                && idle
+                && app.started.elapsed() < RESTART_WITHIN
+                && std::env::var_os(RESTARTED).is_none()
+            {
+                match start_again() {
+                    Ok(()) => return iced::exit(),
+                    Err(e) => asis::log::line(&format!("restart: {e}")),
                 }
             }
         }
@@ -1095,11 +1117,26 @@ fn subscription(_: &App) -> Subscription<Msg> {
     })
 }
 
+/// 開いてから、この時間のうちに新しい版が入ったら、聞かずに開き直す(開いたら、いつも新しい版で動くように)。
+/// これを過ぎていたら、作業の途中かもしれないので、知らせの行と Restart now に任せる
+const RESTART_WITHIN: Duration = Duration::from_secs(90);
+/// 自分で開き直した印。開き直した先では、もう自分では開き直さない(繰り返さないため)
+const RESTARTED: &str = "ASIS_RESTARTED";
+
+/// 同じ場所の実行ファイル(もう新しい版に入れ替わっている)を、同じ引数で起こす
+fn start_again() -> std::io::Result<()> {
+    std::process::Command::new(std::env::current_exe()?)
+        .args(std::env::args_os().skip(1))
+        .env(RESTARTED, "1")
+        .spawn()
+        .map(|_| ())
+}
+
 /// 新しい版を確かめる間隔
 const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// 動いている exe のフォルダで、新しい版を確かめ続ける。新しければ裏で入れ替える(次に開くと、その版で動く)。
-/// 最初の 1 回は、読み込みの邪魔をしないよう少し待つ
+/// 開いたらすぐ 1 回 確かめる(新しい版があれば、開いた直後のうちに開き直せるように)
 fn watch_updates(app: asis::update::App) {
     let Some(dir) = std::env::current_exe()
         .ok()
@@ -1109,14 +1146,23 @@ fn watch_updates(app: asis::update::App) {
     };
     // 前の入れ替えで退かした古いファイルを消す(動いている間は消せなかったもの)
     asis::update::clean(&dir);
+    // 最初の 1 回の結果は、窓にも知らせる(開いた直後なら、新しい版で開き直すため)
+    let (first, heard) = std::sync::mpsc::channel();
+    if let Ok(mut slot) = FIRST_CHECK.lock() {
+        *slot = Some(heard);
+    }
     std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_secs(10));
+        let mut first = Some(first);
         loop {
-            if let Some(db) = asis::config::load().ok().and_then(|local| local.db) {
-                let outcome = asis::update::run_once(&app, &dir, &db);
-                if let Ok(mut slot) = UPDATE.lock() {
-                    *slot = Some(outcome);
-                }
+            let outcome = match asis::config::load().ok().and_then(|local| local.db) {
+                Some(db) => asis::update::run_once(&app, &dir, &db),
+                None => asis::update::Outcome::Nothing,
+            };
+            if let Ok(mut slot) = UPDATE.lock() {
+                *slot = Some(outcome.clone());
+            }
+            if let Some(first) = first.take() {
+                let _ = first.send(outcome);
             }
             std::thread::sleep(UPDATE_EVERY);
         }
