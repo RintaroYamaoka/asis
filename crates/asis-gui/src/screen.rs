@@ -281,6 +281,22 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
                 .color(BAD),
             );
         }
+        Some(asis::update::Outcome::Available(version)) => {
+            errors = errors.push(
+                row![
+                    text(if app.english {
+                        format!("Version {version} is out. It is being rebuilt from source in another window; it starts the next time you open AsIs.")
+                    } else {
+                        format!("版 {version} が出ています。別の窓で、ソースから作り直しています。終わったら、次に AsIs を開くとその版で動きます。")
+                    })
+                    .size(13)
+                    .color(TEXT),
+                    seg("Rebuild again".into(), false, Msg::Rebuild(version)),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center),
+            );
+        }
         Some(asis::update::Outcome::Nothing) | None => {}
     }
     // 上に出す行が 1 つでもあるか(読めなかった理由か、版の入れ替えの知らせ)
@@ -288,7 +304,11 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
         || matches!(app.rooms, Rooms::Failed(_))
         || matches!(
             update_outcome(),
-            Some(asis::update::Outcome::Ready(_) | asis::update::Outcome::Blocked(_))
+            Some(
+                asis::update::Outcome::Ready(_)
+                    | asis::update::Outcome::Blocked(_)
+                    | asis::update::Outcome::Available(_)
+            )
         );
 
     let foot = row![

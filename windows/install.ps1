@@ -7,7 +7,16 @@ param([string]$Exe = 'asis-gui.exe', [string]$Wsl = '')
 $ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:LOCALAPPDATA 'Programs\asis'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
-Copy-Item -Force (Join-Path $PSScriptRoot '*.exe') $dir
+# 動いている exe は上書きできないので、別名に退かしてから新しいものを置く(AsIs を開いたままでも入る)。
+# 退かしたものは、次に AsIs を開いたときに消える
+foreach ($exe in Get-ChildItem (Join-Path $PSScriptRoot '*.exe')) {
+    $to = Join-Path $dir $exe.Name
+    if (Test-Path $to) {
+        Remove-Item -Force "$to.old" -ErrorAction SilentlyContinue
+        Rename-Item $to "$($exe.Name).old"
+    }
+    Copy-Item -Force $exe.FullName $to
+}
 
 # スタートメニューに「AsIs」を置く(前の名前「asis」のものは消す)
 $menu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\AsIs.lnk'
