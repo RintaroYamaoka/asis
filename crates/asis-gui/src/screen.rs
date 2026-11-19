@@ -24,7 +24,7 @@ pub fn repos_of(app: &App) -> Vec<String> {
 /// 窓の中身。上の帯を自分で描く出し方なら、帯を足す
 pub fn view(app: &App) -> Element<'_, Msg> {
     match PLATFORM.get() {
-        Some(p) if p.own_bar => chrome::frame("asis", screen(app), Msg::Win),
+        Some(p) if p.own_bar => chrome::frame("AsIs", screen(app), Msg::Win),
         _ => screen(app),
     }
 }
@@ -70,9 +70,8 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
             .on_press(msg)
             .into()
     };
-    let mut rail = column![tile("All".into(), app.room.is_none(), 0, Msg::Room(None))]
-        .spacing(10)
-        .align_x(Alignment::Center);
+    // 部屋をまたいだ「全部」は置かない(1 つの部屋と同じ形で混ぜて出しても、どの部屋の話か分からない)
+    let mut rail = column![].spacing(10).align_x(Alignment::Center);
     for (i, s) in app.sections.iter().enumerate() {
         let mine = s
             .repos
@@ -145,13 +144,9 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
         .collect();
     let mut side = column![
         container(
-            text(
-                section
-                    .map(|s| s.project.clone())
-                    .unwrap_or("All rooms".into())
-            )
-            .size(17)
-            .color(TEXT)
+            text(section.map(|s| s.project.clone()).unwrap_or("AsIs".into()))
+                .size(17)
+                .color(TEXT)
         )
         .padding([18, 18]),
         nav(

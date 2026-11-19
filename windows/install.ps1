@@ -9,8 +9,9 @@ $dir = Join-Path $env:LOCALAPPDATA 'Programs\asis'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 Copy-Item -Force (Join-Path $PSScriptRoot '*.exe') $dir
 
-# スタートメニューに「asis」を置く
-$menu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\asis.lnk'
+# スタートメニューに「AsIs」を置く(前の名前「asis」のものは消す)
+$menu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\AsIs.lnk'
+Remove-Item -Force $menu -ErrorAction SilentlyContinue
 $link = (New-Object -ComObject WScript.Shell).CreateShortcut($menu)
 $link.TargetPath = Join-Path $dir $Exe
 $link.Arguments = if ($Wsl) { "--wsl $Wsl" } else { '' }
@@ -23,10 +24,10 @@ if (($path -split ';') -notcontains $dir) {
     [Environment]::SetEnvironmentVariable('Path', ($path.TrimEnd(';') + ';' + $dir), 'User')
 }
 
-Write-Host "asis を入れました: $dir"
-Write-Host 'スタートメニューの「asis」から開けます。'
+Write-Host "AsIs を入れました: $dir"
+Write-Host 'スタートメニューの「AsIs」から開けます。'
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Write-Host ''
-    Write-Host 'GitHub の公式コマンド gh が見つかりません。asis は gh のログインを借りて読みます。'
+    Write-Host 'GitHub の公式コマンド gh が見つかりません。AsIs は gh のログインを借りて読みます。'
     Write-Host '  winget install GitHub.cli   のあと   gh auth login'
 }

@@ -365,9 +365,10 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                             app.want_room = None;
                         }
                     }
-                    // 最初に開いたとき、部屋が 1 つならそれを開く
-                    if app.synced.is_none() && sections.len() == 1 {
+                    // いつも、どれか 1 つの部屋を開いている(開いていた部屋が無くなったら、最初の部屋)
+                    if app.room.is_none() && !sections.is_empty() {
                         app.room = Some(0);
+                        app.repo = None;
                     }
                     app.sections = sections;
                     app.rooms = rooms;
@@ -893,7 +894,7 @@ pub fn run(reader: Option<Arc<dyn asis::extra::Reader>>) -> iced::Result {
         })
         .unwrap_or((1320.0, 820.0));
     iced::application(boot, update, view)
-        .title(|_: &App| std::env::var("ASIS_TITLE").unwrap_or_else(|_| "asis".into()))
+        .title(|_: &App| std::env::var("ASIS_TITLE").unwrap_or_else(|_| "AsIs".into()))
         .subscription(subscription)
         .default_font(Font::with_name(font))
         .scale_factor(move |_| platform.scale)

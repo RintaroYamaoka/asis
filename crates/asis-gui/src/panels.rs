@@ -296,8 +296,8 @@ fn no_github(app: &App) -> Element<'_, Msg> {
         column![
             text("Not connected to GitHub").size(26).color(TEXT),
             text(app.t(
-                "asis は、GitHub の公式コマンド gh のログインを借りて読みます。この PC では、まだ使えません。",
-                "asis reads GitHub through the official gh command. It is not available on this machine yet."
+                "AsIs は、GitHub の公式コマンド gh のログインを借りて読みます。この PC では、まだ使えません。",
+                "AsIs reads GitHub through the official gh command. It is not available on this machine yet."
             ))
             .size(14)
             .color(DIM),
@@ -376,10 +376,10 @@ fn welcome(app: &App) -> Element<'_, Msg> {
     let signed = matches!(app.rooms, Rooms::Read(_));
     page(
         column![
-            text("asis").size(26).color(TEXT),
+            text("AsIs").size(26).color(TEXT),
             text(app.t(
                 "開発を、あるがままに見える化します。何も入力しなくても、GitHub で起きていることから「いまどこまで進んでいて、次は誰の番か」を出します。",
-                "See development as it is. With no input at all, asis reads what happened on GitHub and shows how far things are and whose turn is next."
+                "See development as it is. With no input at all, AsIs reads what happened on GitHub and shows how far things are and whose turn is next."
             ))
             .size(14)
             .color(DIM),
@@ -722,7 +722,7 @@ fn members<'a>(app: &'a App, room: &'a Room, admin: bool) -> Element<'a, Msg> {
         .align_y(Alignment::Center),
         cap(app.t(
             "Invite された人は、次に開いたとき、この Room が出ます。Invite しても、repository を見る権限は渡りません。",
-            "Invited people see this Room the next time they open asis. An invite never grants access to a repository."
+            "Invited people see this Room the next time they open AsIs. An invite never grants access to a repository."
         )),
         notice_line(app),
     ]
@@ -925,7 +925,7 @@ fn look(app: &App) -> Element<'_, Msg> {
         h4("Color"),
         cap(app.t(
             "画面で使う色は 1 色だけです。自分の番と、いま居る場所に使います。",
-            "asis uses a single color: for your turn and for where you are."
+            "AsIs uses a single color: for your turn and for where you are."
         )),
         swatches,
         row![
@@ -1037,7 +1037,7 @@ fn database(app: &App) -> Element<'_, Msg> {
         notice_line(app),
         Space::new().height(6),
         h4("About"),
-        cap(format!("asis {} · MIT · development, as is", env!("CARGO_PKG_VERSION"))),
+        cap(format!("AsIs {} · MIT · development, as is", env!("CARGO_PKG_VERSION"))),
     ]
     .spacing(14)
     .into()

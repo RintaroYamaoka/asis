@@ -685,8 +685,8 @@ fn open_browser(url: &str) {
     }
 }
 
-const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>asis</title>\
-<body style=\"font-family:sans-serif;padding:3em\"><h2>asis</h2><p>";
+const DONE_PAGE: &str = "<!doctype html><meta charset=utf-8><title>AsIs</title>\
+<body style=\"font-family:sans-serif;padding:3em\"><h2>AsIs</h2><p>";
 
 /// ログインを待つ長さ。ブラウザで何もしなければ、ここで諦める(受け口を開けたままにしない)
 const SIGN_IN_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
