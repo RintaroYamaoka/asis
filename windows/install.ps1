@@ -9,13 +9,14 @@ $dir = Join-Path $env:LOCALAPPDATA 'Programs\asis'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 # 動いている exe は上書きできないので、別名に退かしてから新しいものを置く(AsIs を開いたままでも入る)。
 # 退かしたものは、次に AsIs を開いたときに消える
-foreach ($exe in Get-ChildItem (Join-Path $PSScriptRoot '*.exe')) {
-    $to = Join-Path $dir $exe.Name
+# (変数の名前を $exe にしない。PowerShell は大文字と小文字を分けないので、引数の $Exe を書き換えてしまう)
+foreach ($file in Get-ChildItem (Join-Path $PSScriptRoot '*.exe')) {
+    $to = Join-Path $dir $file.Name
     if (Test-Path $to) {
         Remove-Item -Force "$to.old" -ErrorAction SilentlyContinue
-        Rename-Item $to "$($exe.Name).old"
+        Rename-Item $to "$($file.Name).old"
     }
-    Copy-Item -Force $exe.FullName $to
+    Copy-Item -Force $file.FullName $to
 }
 
 # スタートメニューに「AsIs」を置く(前の名前「asis」のものは消す)
