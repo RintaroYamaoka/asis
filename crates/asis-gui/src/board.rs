@@ -148,12 +148,7 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
     let tasks = lanes(&all);
     let free = loose(&all);
     if all.is_empty() {
-        let every = items(app);
-        let others = every
-            .iter()
-            .filter(|(v, r)| r.shows(Filter::Others, &v.viewer))
-            .count();
-        return panels::empty(app, every.len(), others);
+        return panels::empty(app);
     }
     if app.look == Look::List {
         let mut body = column![].spacing(8).padding([14, 22]).width(Length::Fill);

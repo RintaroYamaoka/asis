@@ -9,6 +9,7 @@ pub mod host;
 pub mod lang;
 pub mod local;
 pub mod room;
+pub mod skill;
 pub mod tui;
 pub mod view;
 

@@ -1,24 +1,28 @@
-//! 窓の中身の組み立て。左端の部屋の列 → repo とメンバー → 真ん中
+//! 窓の中身の組み立て。左端に部屋の列 → 左の欄(部屋の中の道か、この PC の設定の道)→ 真ん中(ページ)
 
 use super::*;
 use iced::widget::{column, row};
 
 /// 開いている部屋の repo
 pub fn repos_of(app: &App) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for (_, s) in app
-        .sections
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| app.room.is_none_or(|r| r == *i))
-    {
-        for v in s.repos.iter().filter_map(|r| r.as_ref().ok()) {
-            if !out.contains(&v.repo) {
-                out.push(v.repo.clone());
-            }
+    views(app).iter().map(|v| v.repo.clone()).collect()
+}
+
+/// いま出すページ。読み直しで無くなったもの(外した repository・外れた人)を指していたら、1 つ上に戻す
+pub fn page_of(app: &App) -> Page {
+    let room = panels::open_room(app);
+    let read = |repo: &String| views(app).iter().any(|v| v.repo == *repo);
+    let listed = |repo: &String| room.is_some_and(|r| r.repos.contains(repo));
+    match &app.page {
+        // 読めていない repository は、ボードが無いので設定を出す
+        Page::Repo(repo) if !read(repo) && listed(repo) => Page::RepoSettings(repo.clone()),
+        Page::Repo(repo) | Page::RepoSettings(repo) if !read(repo) && !listed(repo) => Page::Repos,
+        Page::Members | Page::Member(_) | Page::RoomSettings if room.is_none() => Page::Repos,
+        Page::Member(id) if !room.is_some_and(|r| r.members.iter().any(|m| m.github_id == *id)) => {
+            Page::Members
         }
+        page => page.clone(),
     }
-    out
 }
 
 /// 窓の中身。上の帯を自分で描く出し方なら、帯を足す
@@ -29,95 +33,27 @@ pub fn view(app: &App) -> Element<'_, Msg> {
     }
 }
 
-pub fn screen(app: &App) -> Element<'_, Msg> {
-    let all = items(app);
-    let count = |f: Filter| all.iter().filter(|(v, r)| r.shows(f, &v.viewer)).count();
-
-    // 左端:部屋の列。数字は、その部屋で自分の番の件数
-    let tile = |label: String, on: bool, badge: usize, msg: Msg| -> Element<'_, Msg> {
-        let accent = app.accent;
-        let size = if label.chars().count() > 4 { 10 } else { 12 };
-        let inner = column![text(label).size(size).color(if on { accent } else { TEXT })]
-            .push(if badge > 0 {
-                Element::from(text(badge.to_string()).size(11).color(accent))
-            } else {
-                Space::new().into()
-            })
-            .align_x(Alignment::Center);
-        button(container(inner).center_x(44).center_y(40))
-            .padding(0)
-            .style(move |_, status| button::Style {
-                background: Some(
-                    if matches!(status, button::Status::Hovered) {
-                        PANEL
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                ),
-                text_color: TEXT,
-                border: Border {
-                    color: if on {
-                        accent
-                    } else {
-                        Color::from_rgb(0.165, 0.173, 0.165)
-                    },
-                    width: 1.0,
-                    radius: 5.0.into(),
-                },
-                ..button::Style::default()
-            })
-            .on_press(msg)
-            .into()
-    };
-    // 部屋をまたいだ「全部」は置かない(1 つの部屋と同じ形で混ぜて出しても、どの部屋の話か分からない)
-    let mut rail = column![].spacing(10).align_x(Alignment::Center);
-    for (i, s) in app.sections.iter().enumerate() {
-        let mine = s
-            .repos
-            .iter()
-            .filter_map(|r| r.as_ref().ok())
-            .flat_map(|v| {
-                v.groups
-                    .iter()
-                    .flat_map(move |g| g.rows.iter().map(move |r| (v, r)))
-            })
-            .filter(|(v, r)| r.is_mine(&v.viewer))
-            .count();
-        let name: String = short(&s.project).chars().take(4).collect();
-        rail = rail.push(tile(name, app.room == Some(i), mine, Msg::Room(Some(i))));
-    }
-    rail = rail
-        .push(tile(
-            "+".into(),
-            app.pop == Some(Pop::NewRoom),
-            0,
-            Msg::Pop(Some(Pop::NewRoom)),
-        ))
-        .push(Space::new().height(Length::Fill));
-    rail = rail.push(tile(
-        "Settings".into(),
-        matches!(app.pop, Some(Pop::Settings(_))),
-        0,
-        Msg::Pop(Some(Pop::Settings(SetTab::Look))),
-    ));
-
-    // 2 列目:その部屋の repo とメンバー
-    let section = app.room.and_then(|i| app.sections.get(i));
-    let nav = |label: String, n: usize, on: bool, msg: Msg| -> Element<'_, Msg> {
-        button(
-            row![
-                text(label).size(14).color(if on { TEXT } else { DIM }),
-                Space::new().width(Length::Fill),
-                cap(n.to_string()),
-            ]
-            .align_y(Alignment::Center),
-        )
-        .padding([8, 18])
-        .width(Length::Fill)
+/// 左端の 1 枚。数字は、その部屋で自分の番の件数
+fn rail_tile<'a>(
+    label: String,
+    on: bool,
+    badge: usize,
+    accent: Color,
+    msg: Msg,
+) -> Element<'a, Msg> {
+    let size = if label.chars().count() > 4 { 10 } else { 12 };
+    let inner = column![text(label).size(size).color(if on { accent } else { TEXT })]
+        .push(if badge > 0 {
+            Element::from(text(badge.to_string()).size(11).color(accent))
+        } else {
+            Space::new().into()
+        })
+        .align_x(Alignment::Center);
+    button(container(inner).center_x(44).center_y(40))
+        .padding(0)
         .style(move |_, status| button::Style {
             background: Some(
-                if on || matches!(status, button::Status::Hovered) {
+                if matches!(status, button::Status::Hovered) {
                     PANEL
                 } else {
                     Color::TRANSPARENT
@@ -125,145 +61,73 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
                 .into(),
             ),
             text_color: TEXT,
+            border: Border {
+                color: if on { accent } else { FRAME },
+                width: 1.0,
+                radius: 5.0.into(),
+            },
             ..button::Style::default()
         })
         .on_press(msg)
         .into()
-    };
-    let room_items: Vec<Item<'_>> = app
-        .sections
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| app.room.is_none_or(|r| r == *i))
-        .flat_map(|(_, s)| s.repos.iter().filter_map(|r| r.as_ref().ok()))
-        .flat_map(|v| {
-            v.groups
-                .iter()
-                .flat_map(move |g| g.rows.iter().map(move |r| (v, r)))
-        })
-        .collect();
-    let mut side = column![
-        container(
-            text(section.map(|s| s.project.clone()).unwrap_or("AsIs".into()))
-                .size(17)
-                .color(TEXT)
-        )
-        .padding([18, 18]),
-        nav(
-            "All".into(),
-            room_items.len(),
-            app.repo.is_none(),
-            Msg::Repo(None)
-        ),
-    ];
-    let mut repos: Vec<&str> = Vec::new();
-    for s in app
-        .sections
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| app.room.is_none_or(|r| r == *i))
-        .map(|(_, s)| s)
-    {
-        for v in s.repos.iter().filter_map(|r| r.as_ref().ok()) {
-            if !repos.contains(&v.repo.as_str()) {
-                repos.push(&v.repo);
+}
+
+/// 左の欄の 1 行。居る場所は明るく
+fn nav<'a>(label: &str, count: Option<usize>, on: bool, msg: Msg) -> Element<'a, Msg> {
+    button(
+        row![
+            text(label.to_string())
+                .size(14)
+                .color(if on { TEXT } else { DIM }),
+            Space::new().width(Length::Fill),
+            cap(count.map(|n| n.to_string()).unwrap_or_default()),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .padding([8, 18])
+    .width(Length::Fill)
+    .style(move |_, status| button::Style {
+        background: Some(
+            if on || matches!(status, button::Status::Hovered) {
+                PANEL
+            } else {
+                Color::TRANSPARENT
             }
-        }
-    }
-    for repo in repos {
-        let n = room_items.iter().filter(|(v, _)| v.repo == repo).count();
-        side = side.push(nav(
-            short(repo).to_string(),
-            n,
-            app.repo.as_deref() == Some(repo),
-            Msg::Repo(Some(repo.to_string())),
+            .into(),
+        ),
+        text_color: TEXT,
+        ..button::Style::default()
+    })
+    .on_press(msg)
+    .into()
+}
+
+/// ボードの上の帯。repository の切り替え(絞り込みは置かない)・見せ方・その repository の設定・読み直し・New issue
+fn board_bar<'a>(app: &'a App, repo: &str) -> Element<'a, Msg> {
+    let mut bar = row![].spacing(6).align_y(Alignment::Center);
+    for v in views(app) {
+        let (_, mine) = counts(v);
+        let name = short(&v.repo);
+        bar = bar.push(seg(
+            if mine > 0 {
+                format!("{name} {mine}")
+            } else {
+                name.to_string()
+            },
+            v.repo == repo,
+            Msg::Go(Page::Repo(v.repo.clone())),
         ));
     }
-    if let Some(s) = section.filter(|s| !s.people.is_empty()) {
-        side = side.push(container(cap("Members")).padding([14, 18]));
-        for (name, roles) in &s.people {
-            let holds = room_items
-                .iter()
-                .filter(|(_, r)| r.turn.contains(name))
-                .count();
-            let me = room_items.first().is_some_and(|(v, _)| v.viewer == *name);
-            side = side.push(
-                container(
-                    row![
-                        column![
-                            text(name.clone()).size(14).color(TEXT),
-                            cap(if roles.is_empty() {
-                                "Member".to_string()
-                            } else {
-                                roles.clone()
-                            }),
-                        ],
-                        Space::new().width(Length::Fill),
-                        text(if holds > 0 {
-                            holds.to_string()
-                        } else {
-                            String::new()
-                        })
-                        .size(14)
-                        .color(if me { app.accent } else { DIM }),
-                    ]
-                    .align_y(Alignment::Center),
-                )
-                .padding([5, 18]),
-            );
-        }
-    }
-
-    // 部屋(DB の部屋)を開いているときだけ、下に Room settings
-    let side: Element<'_, Msg> = if section.is_some_and(|s| s.room.is_some()) {
-        column![
-            scrollable(side).height(Length::Fill),
-            rule(),
-            button(
-                row![
-                    text("Room settings").size(14).color(DIM),
-                    Space::new().width(Length::Fill),
-                    cap("›"),
-                ]
-                .align_y(Alignment::Center),
-            )
-            .padding([12, 18])
-            .width(Length::Fill)
-            .style(|_, status| button::Style {
-                background: Some(
-                    if matches!(status, button::Status::Hovered) {
-                        PANEL
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                ),
-                text_color: TEXT,
-                ..button::Style::default()
-            })
-            .on_press(Msg::Pop(Some(Pop::Room(RoomTab::Members)))),
-        ]
-        .into()
-    } else {
-        scrollable(side).height(Length::Fill).into()
-    };
-
-    // 上の段:絞り込み、見せ方、読み直し
     let status = match (app.loading, app.synced) {
         (true, _) => "Loading…".to_string(),
         (false, Some(t)) => format!("Synced {}s ago", t.elapsed().as_secs()),
         (false, None) => String::new(),
     };
-    let mut bar = row![].spacing(6).align_y(Alignment::Center);
-    for f in [Filter::All, Filter::Mine, Filter::Others] {
-        bar = bar.push(seg(
-            format!("{} {}", f.label(), count(f)),
-            f == app.filter,
-            Msg::Filter(f),
-        ));
-    }
-    bar = bar
-        .push(Space::new().width(Length::Fill))
+    let notes = views(app)
+        .iter()
+        .find(|v| v.repo == repo)
+        .map_or(0, |v| v.notes.len());
+    bar.push(Space::new().width(Length::Fill))
         .push(cap(status))
         .push(seg(
             "Board".into(),
@@ -275,47 +139,127 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
             app.look == Look::List,
             Msg::Look(Look::List),
         ))
+        .push(seg(
+            if notes > 0 {
+                format!("Repository settings · {notes} note")
+            } else {
+                "Repository settings".to_string()
+            },
+            false,
+            Msg::Go(Page::RepoSettings(repo.to_string())),
+        ))
         .push(seg("Refresh".into(), false, Msg::Refresh))
-        .push(primary("New issue", app.accent, Some(Msg::WriteOpen)));
+        .push(primary("New issue", app.accent, Some(Msg::WriteOpen)))
+        .into()
+}
 
-    // 注記と、読めなかった理由。黙って欠けさせない
-    let mut notes = column![].spacing(2);
-    if let Some(e) = &app.error {
-        notes = notes.push(text(e.clone()).size(13).color(BAD));
+pub fn screen(app: &App) -> Element<'_, Msg> {
+    let page = page_of(app);
+    let settings = match app.area {
+        Area::Settings(tab) => Some(tab),
+        Area::Room => None,
+    };
+
+    // 左端:部屋の列。部屋をまたいだ「全部」は置かない
+    let mut rail = column![].spacing(10).align_x(Alignment::Center);
+    for (i, s) in app.sections.iter().enumerate() {
+        let mine = s
+            .repos
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .map(|v| counts(v).1)
+            .sum();
+        let name: String = short(&s.project).chars().take(4).collect();
+        rail = rail.push(rail_tile(
+            name,
+            settings.is_none() && app.room == Some(i),
+            mine,
+            app.accent,
+            Msg::Room(Some(i)),
+        ));
     }
-    if let Rooms::Failed(e) = &app.rooms {
-        notes = notes.push(text(format!("Rooms: {e}")).size(13).color(BAD));
-    }
-    for s in app
-        .sections
-        .iter()
-        .enumerate()
-        .filter(|(i, _)| app.room.is_none_or(|r| r == *i))
-        .map(|(_, s)| s)
-    {
-        for r in &s.repos {
-            match r {
-                Err(e) => notes = notes.push(text(e.clone()).size(13).color(BAD)),
-                Ok(v) => {
-                    for n in &v.notes {
-                        notes = notes.push(cap(format!("{}: {n}", short(&v.repo))));
-                    }
+    rail = rail
+        .push(rail_tile(
+            "+".into(),
+            app.pop == Some(Pop::NewRoom),
+            0,
+            app.accent,
+            Msg::Pop(Some(Pop::NewRoom)),
+        ))
+        .push(Space::new().height(Length::Fill))
+        .push(rail_tile(
+            "Settings".into(),
+            settings.is_some(),
+            0,
+            app.accent,
+            Msg::Area(Area::Settings(SetTab::Look)),
+        ));
+
+    // 左の欄:部屋の中の道(Repositories / Members / Room settings)か、この PC の設定の道
+    let title = |s: String| container(text(s).size(17).color(TEXT)).padding([18, 18]);
+    let side: Element<'_, Msg> = match settings {
+        Some(tab) => {
+            let go =
+                |label: &str, x: SetTab| nav(label, None, tab == x, Msg::Area(Area::Settings(x)));
+            column![
+                title("Settings".into()),
+                go("Appearance", SetTab::Look),
+                go("Account", SetTab::Account),
+                go("Claude", SetTab::Claude),
+                go("Local work", SetTab::Local),
+                go("Database", SetTab::Db),
+                go("About", SetTab::About),
+            ]
+            .into()
+        }
+        None => {
+            let mut side = column![title(
+                section(app)
+                    .map(|s| s.project.clone())
+                    .unwrap_or_else(|| "AsIs".into())
+            )];
+            if let Some(s) = section(app) {
+                let room = panels::open_room(app);
+                side = side.push(nav(
+                    "Repositories",
+                    Some(room.map_or(s.repos.len(), |r| r.repos.len())),
+                    matches!(page, Page::Repos | Page::Repo(_) | Page::RepoSettings(_)),
+                    Msg::Go(Page::Repos),
+                ));
+                // Members と Room settings は、DB の部屋のときだけ
+                if let Some(room) = room {
+                    side = side
+                        .push(nav(
+                            "Members",
+                            Some(room.members.len()),
+                            matches!(page, Page::Members | Page::Member(_)),
+                            Msg::Go(Page::Members),
+                        ))
+                        .push(nav(
+                            "Room settings",
+                            None,
+                            page == Page::RoomSettings,
+                            Msg::Go(Page::RoomSettings),
+                        ));
                 }
             }
+            side.into()
         }
-    }
-
-    // 真ん中:ボードかリスト。issue につながっていない PR は別の段
-    // 右:選んだ 1 件
-    let detail = if app.write.is_some() {
-        write_form(app)
-    } else {
-        detail_of(app)
     };
+
+    // 読めなかった理由は、どのページでも上に出す(黙って欠けさせない)
+    let mut errors = column![].spacing(2);
+    if let Some(e) = &app.error {
+        errors = errors.push(text(e.clone()).size(13).color(BAD));
+    }
+    if let Rooms::Failed(e) = &app.rooms {
+        errors = errors.push(text(format!("Rooms: {e}")).size(13).color(BAD));
+    }
+    let failed = app.error.is_some() || matches!(app.rooms, Rooms::Failed(_));
 
     let foot = row![
         cap("↑↓ Move"),
-        cap("Tab Filter"),
+        cap("Tab Next repository"),
         cap("V Board / List"),
         cap("Enter Open"),
         cap("←→ Prev / Next PR"),
@@ -326,19 +270,30 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
     .spacing(18)
     .padding([9, 22]);
 
-    // ボードを出せないとき(GitHub につながっていない・はじめて・読み込み中)は、代わりの画面だけを出す
-    let main: Element<'_, Msg> = match panels::scene(app) {
-        Some(scene) => scene,
-        None => column![
-            container(bar).padding([14, 22]),
+    // 真ん中:この PC の設定 → ボードを出せないときの代わりの画面 → 部屋のページ、の順に決める
+    let body: Element<'_, Msg> = if let Some(tab) = settings {
+        settings_page(app, tab)
+    } else if let Some(scene) = panels::scene(app) {
+        scene
+    } else if let Some(repo) = board_repo(app) {
+        // ボードは repository 1 つにつき 1 つ
+        column![
+            container(board_bar(app, &repo)).padding([14, 22]),
             rule(),
-            container(notes).padding([6, 22]),
             responsive(move |size| middle(app, size.width)),
             rule(),
             foot,
         ]
-        .into(),
+        .into()
+    } else {
+        responsive(move |size| room_page(app, page.clone(), size.width)).into()
     };
+    let main: Element<'_, Msg> = if failed {
+        column![container(errors).padding([8, 22]), rule(), body].into()
+    } else {
+        body
+    };
+
     let frame = row![
         container(rail).padding([14, 9]).height(Length::Fill),
         vrule(),
@@ -348,7 +303,7 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
     ]
     .height(Length::Fill);
     let base: Element<'_, Msg> = container(frame).style(fill(BG)).into();
-    // 設定の画面も、前に出す
+    // 1 件を作る画面(New room)は、前に出す
     if let Some((body, width)) = panels::pop(app) {
         return stack![
             base,
@@ -369,7 +324,12 @@ pub fn screen(app: &App) -> Element<'_, Msg> {
         ]
         .into();
     }
-    // 選んだ 1 件の中身は、前に大きく出す。ボードの幅を取らないので、カードの形が変わらない
+    // 選んだ 1 件の中身(issue・PR)と、New issue も、前に大きく出す
+    let detail = if app.write.is_some() {
+        write_form(app)
+    } else {
+        detail_of(app)
+    };
     match detail.filter(|_| app.open || app.write.is_some()) {
         Some(detail) => stack![
             base,

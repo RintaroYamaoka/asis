@@ -73,6 +73,26 @@ pub fn wsl_config_dir() -> Option<PathBuf> {
     .clone()
 }
 
+/// 仕事場のホーム。仕事場が WSL の中なら、その中のホームを Windows から見える書き方で返す。聞くのは 1 回だけ
+pub fn home_dir() -> Option<PathBuf> {
+    static DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+    DIR.get_or_init(|| {
+        if wsl().is_some() {
+            let out = command("sh")
+                .args(["-c", r#"wslpath -w "$HOME""#])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())?;
+            let dir = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return (!dir.is_empty()).then(|| PathBuf::from(dir));
+        }
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    })
+    .clone()
+}
+
 /// 仕事場のコマンド(gh・git・herdr など)
 pub fn command(program: &str) -> Command {
     match wsl() {

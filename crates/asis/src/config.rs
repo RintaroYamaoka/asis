@@ -230,26 +230,37 @@ pub fn load() -> Result<Local, String> {
 
 /// `watch` の行だけを書き換えた設定ファイルの中身を返す。ほかの行(手元の定義やコメント)は触らない。
 pub fn with_watch(text: &str, watch: &[String]) -> Result<String, String> {
-    let is_watch = |line: &str| {
-        line.trim_start()
-            .strip_prefix("watch")
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-    };
+    with_list(text, "watch", watch)
+}
+
+/// `roots`(手元の clone を探すフォルダ)の行だけを書き換えた中身を返す。ほかの行は触らない。
+pub fn with_roots(text: &str, roots: &[String]) -> Result<String, String> {
+    with_list(text, "roots", roots)
+}
+
+/// 一番上の段の `key = ["a", "b"]` の 1 行を書き換える
+fn with_list(text: &str, key: &str, list: &[String]) -> Result<String, String> {
+    let top = text.lines().position(is_header).unwrap_or(usize::MAX);
+    let hit = |(i, line): (usize, &str)| i < top && is_key(line, key);
     if text
         .lines()
-        .any(|l| is_watch(l) && !l.trim_end().ends_with(']'))
+        .enumerate()
+        .any(|(i, l)| hit((i, l)) && !l.trim_end().ends_with(']'))
     {
-        return Err(crate::lang::t(
-            "watch が複数行で書かれています。設定ファイルを手で直してください",
-            "watch spans several lines. Fix the settings file by hand",
-        )
-        .into());
+        return Err(crate::say!(
+            "{key} が複数行で書かれています。設定ファイルを手で直してください",
+            "{key} spans several lines. Fix the settings file by hand"
+        ));
     }
-    let rest: Vec<&str> = text.lines().filter(|l| !is_watch(l)).collect();
+    let rest: Vec<&str> = text
+        .lines()
+        .enumerate()
+        .filter(|(i, l)| !hit((*i, l)))
+        .map(|(_, l)| l)
+        .collect();
     let line = format!(
-        "watch = [{}]",
-        watch
-            .iter()
+        "{key} = [{}]",
+        list.iter()
             .map(|r| format!("\"{r}\""))
             .collect::<Vec<_>>()
             .join(", ")
@@ -604,6 +615,23 @@ deploy = ["me"]
         assert!(bad("http://x.example", "k"));
         assert!(bad("https://x.example", ""));
         assert!(bad("https://x.example", "a\"b"));
+    }
+
+    #[test]
+    fn with_roots_rewrites_only_that_line_and_keeps_the_rest() {
+        let w = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let text = "watch = [\"o/a\"]\nroots = [\"~/dev\"]\nlang = \"ja\"\n\n[db]\nurl = \"https://x.supabase.co\"\nkey = \"k\"\n";
+        let next = with_roots(text, &w(&["~/dev", "~/src"])).unwrap();
+        let local = parse_local(&next).unwrap();
+        assert_eq!(local.roots, w(&["~/dev", "~/src"]));
+        assert_eq!(local.watch, w(&["o/a"]));
+        assert_eq!(local.lang.as_deref(), Some("ja"));
+        assert_eq!(local.db.unwrap().url, "https://x.supabase.co");
+        // 空にもできる
+        assert!(parse_local(&with_roots(&next, &[]).unwrap())
+            .unwrap()
+            .roots
+            .is_empty());
     }
 
     #[test]

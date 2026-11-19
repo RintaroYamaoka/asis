@@ -1,28 +1,24 @@
-//! ボード以外の画面:はじめの画面・困ったときの見せ方・Settings・Room settings・New room。
+//! ボードの代わりに出す画面(はじめの画面・困ったときの見せ方)と、この PC の設定の中身、New room、
+//! それに、ページを組む小さな部品。部屋の中のページは `pages.rs`。
 //! 形は試作(asis-prototype.html)のとおり。言葉は英語、説明の文だけ設定の言葉で出す。
 use super::*;
 use iced::widget::{column, row};
 
-/// 前に出す設定の画面
+/// 前に出す画面。1 件を作るものだけ(設定はページにした)
 #[derive(Clone, Copy, PartialEq)]
 pub enum Pop {
-    Settings(SetTab),
-    Room(RoomTab),
     NewRoom,
 }
 
+/// この PC の設定のページ
 #[derive(Clone, Copy, PartialEq)]
 pub enum SetTab {
     Look,
     Account,
+    Claude,
+    Local,
     Db,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-pub enum RoomTab {
-    Members,
-    Repos,
-    Room,
+    About,
 }
 
 /// 選べる 1 色
@@ -35,21 +31,12 @@ const COLORS: [(&str, &str); 6] = [
     ("#e6e8ec", "White"),
 ];
 
-fn h4<'a>(s: &str) -> iced::widget::Text<'a> {
+pub fn h4<'a>(s: &str) -> iced::widget::Text<'a> {
     text(s.to_string()).size(16).color(TEXT)
 }
 
-/// 説明の文。設定の言葉で出す(字を組み立てるもの)
-fn say(app: &App, ja: String, en: String) -> String {
-    if app.english {
-        en
-    } else {
-        ja
-    }
-}
-
 /// 打つ欄。`send` が無ければ、Enter では何もしない
-fn input<'a>(
+pub fn input<'a>(
     hint: &str,
     value: &str,
     f: Field,
@@ -82,7 +69,7 @@ fn input<'a>(
 }
 
 /// 小さな切り替え。付いているものは色の枠
-fn tog<'a>(label: &str, on: bool, accent: Color, msg: Option<Msg>) -> Element<'a, Msg> {
+pub fn tog<'a>(label: &str, on: bool, accent: Color, msg: Option<Msg>) -> Element<'a, Msg> {
     let color = if on { accent } else { DIM };
     let b = button(text(label.to_string()).size(12).color(color))
         .padding([2, 9])
@@ -110,7 +97,7 @@ fn tog<'a>(label: &str, on: bool, accent: Color, msg: Option<Msg>) -> Element<'a
 }
 
 /// 取り返しのつかない操作のボタン
-fn danger<'a>(label: &str, msg: Option<Msg>) -> Element<'a, Msg> {
+pub fn danger<'a>(label: &str, msg: Option<Msg>) -> Element<'a, Msg> {
     let b = button(text(label.to_string()).size(13).color(BAD))
         .padding([4, 11])
         .style(|_, status| button::Style {
@@ -137,7 +124,7 @@ fn danger<'a>(label: &str, msg: Option<Msg>) -> Element<'a, Msg> {
 }
 
 /// 名前と説明の 2 段の見出し
-fn label<'a>(name: &str, note: &str) -> Element<'a, Msg> {
+pub fn label<'a>(name: &str, note: &str) -> Element<'a, Msg> {
     column![
         text(name.to_string()).size(14).color(TEXT),
         cap(note.to_string())
@@ -148,7 +135,7 @@ fn label<'a>(name: &str, note: &str) -> Element<'a, Msg> {
 }
 
 /// 線で区切った行の束
-fn lines<'a>(rows: Vec<Element<'a, Msg>>) -> Element<'a, Msg> {
+pub fn lines<'a>(rows: Vec<Element<'a, Msg>>) -> Element<'a, Msg> {
     let mut c = column![].spacing(0);
     let n = rows.len();
     for (i, r) in rows.into_iter().enumerate() {
@@ -160,7 +147,7 @@ fn lines<'a>(rows: Vec<Element<'a, Msg>>) -> Element<'a, Msg> {
     c.into()
 }
 
-fn choice<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
+pub fn choice<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
     container(body)
         .padding([18, 20])
         .width(Length::Fill)
@@ -168,7 +155,7 @@ fn choice<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
         .into()
 }
 
-fn notice_line<'a>(app: &App) -> Element<'a, Msg> {
+pub fn notice_line<'a>(app: &App) -> Element<'a, Msg> {
     notice_of(app).unwrap_or_else(|| Space::new().into())
 }
 
@@ -184,7 +171,7 @@ pub fn me(app: &App) -> Option<String> {
         .find(|v| !v.is_empty())
 }
 
-fn is_me(app: &App, login: &str) -> bool {
+pub fn is_me(app: &App, login: &str) -> bool {
     me(app).is_some_and(|m| m.eq_ignore_ascii_case(login))
 }
 
@@ -200,7 +187,7 @@ pub fn open_room(app: &App) -> Option<&Room> {
     }
 }
 
-fn is_admin(app: &App, room: &Room) -> bool {
+pub fn is_admin(app: &App, room: &Room) -> bool {
     room.members
         .iter()
         .any(|m| m.is_admin && is_me(app, &m.login))
@@ -267,7 +254,7 @@ pub fn scene(app: &App) -> Option<Element<'_, Msg>> {
     None
 }
 
-fn page<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
+pub fn page<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
     scrollable(
         container(container(body).max_width(720))
             .center_x(Length::Fill)
@@ -277,7 +264,7 @@ fn page<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
     .into()
 }
 
-fn code<'a>(s: &str) -> Element<'a, Msg> {
+pub fn code<'a>(s: &str) -> Element<'a, Msg> {
     container(
         text(s.to_string())
             .size(14)
@@ -349,7 +336,7 @@ fn welcome(app: &App) -> Element<'_, Msg> {
             row![primary(
                 "Open Database settings",
                 app.accent,
-                Some(Msg::Pop(Some(Pop::Settings(SetTab::Db))))
+                Some(Msg::Area(Area::Settings(SetTab::Db)))
             )],
         ]
         .spacing(10)
@@ -400,6 +387,22 @@ fn welcome(app: &App) -> Element<'_, Msg> {
                 .spacing(10)
                 .into()
             ),
+            choice(
+                column![
+                    text(app.t("3. Claude をつなぐ", "3. Connect Claude")).size(15).color(TEXT),
+                    cap(app.t(
+                        "手順書を入れると、Claude が issue から作業を始め、PR を issue につなぎます。あとから Settings › Claude でも入れられます。",
+                        "With the skill installed, Claude starts work from an issue and links its PRs. You can also do this later under Settings › Claude."
+                    )),
+                    row![if app.skill {
+                        Element::from(text("Installed").size(13).color(app.accent))
+                    } else {
+                        seg("Install skill".into(), false, Msg::SkillInstall)
+                    }],
+                ]
+                .spacing(10)
+                .into()
+            ),
             notice_line(app),
         ]
         .spacing(18)
@@ -407,7 +410,7 @@ fn welcome(app: &App) -> Element<'_, Msg> {
     )
 }
 
-fn sign_in_button(app: &App) -> Element<'_, Msg> {
+pub fn sign_in_button(app: &App) -> Element<'_, Msg> {
     if app.signing_in {
         column![
             cap(app.t(
@@ -432,50 +435,17 @@ fn sign_in_button(app: &App) -> Element<'_, Msg> {
     }
 }
 
-/// 部屋は開いているが、出すものが無いとき
-pub fn empty<'a>(app: &'a App, total: usize, waiting_on_others: usize) -> Element<'a, Msg> {
-    let section = app.room.and_then(|i| app.sections.get(i));
-    let (head, note, go): (String, String, Option<(&str, Msg)>) = if total > 0
-        && app.filter == Filter::Mine
-    {
-        (
-            "Nothing is waiting on you".into(),
-            say(
-                app,
-                format!("{waiting_on_others} 件が、ほかの人の番です。All に切り替えると見えます。"),
-                format!(
-                    "{waiting_on_others} items are waiting on others. Switch to All to see them."
-                ),
-            ),
-            Some(("Show All", Msg::Filter(Filter::All))),
-        )
-    } else if total > 0 {
-        (
-            "Nothing is waiting on others".into(),
-            String::new(),
-            Some(("Show All", Msg::Filter(Filter::All))),
-        )
-    } else if app.loading && app.synced.is_none() {
-        ("Loading from GitHub…".into(), String::new(), None)
-    } else if section.is_some_and(|s| s.repos.is_empty() && s.room.is_some()) {
-        (
-            "No repositories yet".into(),
-            app.t(
-                "Room settings で repository を足します。",
-                "Add repositories in Room settings.",
-            )
-            .into(),
-            Some(("Room settings", Msg::Pop(Some(Pop::Room(RoomTab::Repos))))),
-        )
+/// ボードに出すものが無いとき
+pub fn empty(app: &App) -> Element<'_, Msg> {
+    let (head, note) = if app.loading && app.synced.is_none() {
+        ("Loading from GitHub…", "")
     } else {
         (
-            "Nothing open".into(),
+            "Nothing open",
             app.t(
                 "開いている issue と pull request はありません。",
                 "No open issues or pull requests.",
-            )
-            .into(),
-            None,
+            ),
         )
     };
     let mut c = column![text(head).size(15).color(TEXT)]
@@ -484,118 +454,14 @@ pub fn empty<'a>(app: &'a App, total: usize, waiting_on_others: usize) -> Elemen
     if !note.is_empty() {
         c = c.push(cap(note));
     }
-    if let Some((label, msg)) = go {
-        c = c.push(seg(label.into(), false, msg));
-    }
     container(c).center(Length::Fill).into()
 }
 
-// ---- 前に出す設定の画面 ----
+// ---- 前に出す画面(1 件を作るもの)----
 
-fn tab<'a>(label: &str, on: bool, msg: Msg) -> Element<'a, Msg> {
-    button(
-        text(label.to_string())
-            .size(14)
-            .color(if on { TEXT } else { DIM }),
-    )
-    .padding([8, 18])
-    .width(Length::Fill)
-    .style(move |_, status| button::Style {
-        background: Some(
-            if on || matches!(status, button::Status::Hovered) {
-                PANEL
-            } else {
-                Color::TRANSPARENT
-            }
-            .into(),
-        ),
-        text_color: TEXT,
-        ..button::Style::default()
-    })
-    .on_press(msg)
-    .into()
-}
-
-/// 左に見出しの列、右に中身
-fn tabbed<'a>(
-    title: String,
-    tabs: Vec<Element<'a, Msg>>,
-    body: Element<'a, Msg>,
-) -> Element<'a, Msg> {
-    let mut nav = column![container(text(title).size(15).color(TEXT)).padding([0, 18])]
-        .spacing(4)
-        .padding([18, 0])
-        .width(190);
-    for t in tabs {
-        nav = nav.push(t);
-    }
-    row![
-        nav,
-        vrule(),
-        scrollable(container(body).padding([22, 24]).width(Length::Fill)).height(Length::Fill),
-    ]
-    .into()
-}
-
-/// 前に出す設定の画面の中身
 pub fn pop(app: &App) -> Option<(Element<'_, Msg>, f32)> {
     Some(match app.pop? {
         Pop::NewRoom => (new_room(app), 600.0),
-        Pop::Settings(t) => {
-            let body = match t {
-                SetTab::Look => look(app),
-                SetTab::Account => account(app),
-                SetTab::Db => database(app),
-            };
-            let go = |l: &str, x: SetTab| tab(l, t == x, Msg::Pop(Some(Pop::Settings(x))));
-            (
-                tabbed(
-                    "Settings".into(),
-                    vec![
-                        go("Appearance", SetTab::Look),
-                        go("Account", SetTab::Account),
-                        go("Database", SetTab::Db),
-                    ],
-                    body,
-                ),
-                820.0,
-            )
-        }
-        Pop::Room(t) => {
-            let Some(room) = open_room(app) else {
-                return Some((
-                    container(cap("Loading…")).center(Length::Fill).into(),
-                    820.0,
-                ));
-            };
-            let admin = is_admin(app, room);
-            let body = match t {
-                RoomTab::Members => members(app, room, admin),
-                RoomTab::Repos => repositories(app, room, admin),
-                RoomTab::Room => room_page(app, room),
-            };
-            let mut top = column![].spacing(14);
-            if !admin {
-                top = top.push(
-                    text(app.t("Admin だけが変えられます", "Only an Admin can change this"))
-                        .size(12)
-                        .color(BAD),
-                );
-            }
-            let go = |l: &str, x: RoomTab| tab(l, t == x, Msg::Pop(Some(Pop::Room(x))));
-            (
-                tabbed(
-                    room.name.clone(),
-                    vec![
-                        go("Members", RoomTab::Members),
-                        go("Repositories", RoomTab::Repos),
-                        go("Room", RoomTab::Room),
-                    ],
-                    top.push(body).into(),
-                ),
-                820.0,
-            )
-        }
     })
 }
 
@@ -623,7 +489,7 @@ fn new_room(app: &App) -> Element<'_, Msg> {
                 "Room を置く DB が、まだ設定にありません。",
                 "No Database is set yet."
             )),
-            row![seg("Open Database settings".into(), false, Msg::Pop(Some(Pop::Settings(SetTab::Db))))],
+            row![seg("Open Database settings".into(), false, Msg::Area(Area::Settings(SetTab::Db)))],
         ]
         .spacing(10)
         .into(),
@@ -649,194 +515,8 @@ fn new_room(app: &App) -> Element<'_, Msg> {
     .into()
 }
 
-fn members<'a>(app: &'a App, room: &'a Room, admin: bool) -> Element<'a, Msg> {
-    let can = admin && !app.busy;
-    let mut rows = Vec::new();
-    for m in &room.members {
-        let mine = is_me(app, &m.login);
-        let mut r = row![
-            container(
-                text(
-                    m.login
-                        .chars()
-                        .next()
-                        .unwrap_or('?')
-                        .to_uppercase()
-                        .to_string()
-                )
-                .size(12)
-                .color(TEXT)
-            )
-            .center_x(26)
-            .center_y(26)
-            .style(boxed(LINE2, Color::TRANSPARENT)),
-            text(if mine {
-                format!("{} (you)", m.login)
-            } else {
-                m.login.clone()
-            })
-            .size(14)
-            .color(TEXT)
-            .width(Length::Fill),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
-        for role in Role::ALL {
-            let on = role.of(m);
-            r = r.push(tog(
-                role.label(),
-                on,
-                app.accent,
-                can.then(|| Msg::RoomOp(Op::Role(room.id.clone(), m.github_id, role, !on))),
-            ));
-        }
-        r = r.push(if mine {
-            Element::from(Space::new().width(62))
-        } else {
-            container(tog(
-                "Remove",
-                false,
-                app.accent,
-                can.then(|| Msg::RoomOp(Op::Kick(room.id.clone(), m.github_id))),
-            ))
-            .width(62)
-            .align_right(62)
-            .into()
-        });
-        rows.push(r.into());
-    }
-    let who = app.form.invite.trim().to_string();
-    let send = (can && !who.is_empty()).then(|| Msg::RoomOp(Op::Invite(room.id.clone(), who)));
-    column![
-        h4("Members"),
-        cap(app.t(
-            "Roles は「誰の番か」を出すためのものです。何かを禁止はしません。",
-            "Roles decide whose turn is shown. They do not restrict anything."
-        )),
-        lines(rows),
-        row![
-            input("GitHub username", &app.form.invite, Field::Invite, send.clone()).width(Length::Fill),
-            primary("Invite", app.accent, send),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-        cap(app.t(
-            "Invite された人は、次に開いたとき、この Room が出ます。Invite しても、repository を見る権限は渡りません。",
-            "Invited people see this Room the next time they open AsIs. An invite never grants access to a repository."
-        )),
-        notice_line(app),
-    ]
-    .spacing(14)
-    .into()
-}
-
-fn repositories<'a>(app: &'a App, room: &'a Room, admin: bool) -> Element<'a, Msg> {
-    let can = admin && !app.busy;
-    let none = || -> Vec<Element<'a, Msg>> { vec![cap("None").into()] };
-    let mut repos: Vec<Element<'a, Msg>> = room
-        .repos
-        .iter()
-        .map(|repo| {
-            let every = room.everyone.contains(repo);
-            row![
-                text(repo.clone()).size(14).color(TEXT).width(Length::Fill),
-                tog(
-                    if every { "Everyone" } else { "Members only" },
-                    every,
-                    app.accent,
-                    can.then(|| Msg::RoomOp(Op::Everyone(room.id.clone(), repo.clone(), !every))),
-                ),
-                tog(
-                    "Remove",
-                    false,
-                    app.accent,
-                    can.then(|| Msg::RoomOp(Op::DropRepo(room.id.clone(), repo.clone()))),
-                ),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        })
-        .collect();
-    if repos.is_empty() {
-        repos = none();
-    }
-    let mut checks: Vec<Element<'a, Msg>> = room
-        .ignore_checks
-        .iter()
-        .map(|c| {
-            let rest: Vec<String> = room
-                .ignore_checks
-                .iter()
-                .filter(|x| *x != c)
-                .cloned()
-                .collect();
-            row![
-                text(c.clone()).size(14).color(TEXT).width(Length::Fill),
-                tog(
-                    "Remove",
-                    false,
-                    app.accent,
-                    can.then(|| Msg::RoomOp(Op::Checks(room.id.clone(), rest))),
-                ),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into()
-        })
-        .collect();
-    if checks.is_empty() {
-        checks = none();
-    }
-    let repo = app.form.repo.trim().to_string();
-    let add_repo =
-        (can && !repo.is_empty()).then(|| Msg::RoomOp(Op::AddRepo(room.id.clone(), repo)));
-    let check = app.form.check.trim().to_string();
-    let add_check = (can && !check.is_empty() && !room.ignore_checks.contains(&check)).then(|| {
-        let mut list = room.ignore_checks.clone();
-        list.push(check);
-        Msg::RoomOp(Op::Checks(room.id.clone(), list))
-    });
-    column![
-        h4("Repositories"),
-        cap(app.t(
-            "この Room で見る repositories。既定では Members の分だけを出します。",
-            "Repositories this Room watches. By default only work by Members is shown."
-        )),
-        lines(repos),
-        row![
-            input("owner/repo", &app.form.repo, Field::Repo, add_repo.clone()).width(Length::Fill),
-            primary("Add", app.accent, add_repo),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-        notice_line(app),
-        Space::new().height(6),
-        h4("Ignored checks"),
-        cap(app.t(
-            "落ちていても Merge を止めない check の名前(preview deploy など)。",
-            "Checks that do not block Merge even when failing (e.g. preview deploys)."
-        )),
-        lines(checks),
-        row![
-            input(
-                "Check name",
-                &app.form.check,
-                Field::Check,
-                add_check.clone()
-            )
-            .width(Length::Fill),
-            seg_opt("Add", add_check),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    ]
-    .spacing(14)
-    .into()
-}
-
 /// 押せないこともある、線の枠のボタン
-fn seg_opt<'a>(label: &str, msg: Option<Msg>) -> Element<'a, Msg> {
+pub fn seg_opt<'a>(label: &str, msg: Option<Msg>) -> Element<'a, Msg> {
     match msg {
         Some(m) => seg(label.into(), false, m),
         None => container(text(label.to_string()).size(14).color(LINE2))
@@ -846,60 +526,7 @@ fn seg_opt<'a>(label: &str, msg: Option<Msg>) -> Element<'a, Msg> {
     }
 }
 
-fn room_page<'a>(app: &'a App, room: &'a Room) -> Element<'a, Msg> {
-    let free = !app.busy;
-    column![
-        h4("Room"),
-        lines(vec![
-            row![
-                text("Name").size(14).color(TEXT).width(Length::Fill),
-                text(room.name.clone()).size(14).color(DIM),
-            ]
-            .into(),
-            row![
-                label(
-                    "Leave room",
-                    app.t(
-                        "自分の画面から、この Room が消えます",
-                        "The Room disappears from your view only"
-                    )
-                ),
-                seg_opt(
-                    "Leave",
-                    free.then(|| Msg::RoomOp(Op::Leave(room.id.clone())))
-                ),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into(),
-            row![
-                label(
-                    "Delete room",
-                    app.t(
-                        "全員の画面から消えます。GitHub の中身は何も変わりません",
-                        "Removes it for everyone. Nothing on GitHub changes"
-                    )
-                ),
-                if app.confirm_delete {
-                    danger(
-                        "Confirm delete",
-                        free.then(|| Msg::RoomOp(Op::Delete(room.id.clone()))),
-                    )
-                } else {
-                    danger("Delete", Some(Msg::AskDelete))
-                },
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .into(),
-        ]),
-        notice_line(app),
-    ]
-    .spacing(14)
-    .into()
-}
-
-fn look(app: &App) -> Element<'_, Msg> {
+pub fn look(app: &App) -> Element<'_, Msg> {
     let mut swatches = row![].spacing(12).align_y(Alignment::Center);
     for (hex, name) in COLORS {
         let color = color_of(hex).unwrap_or(DIM);
@@ -951,7 +578,7 @@ fn look(app: &App) -> Element<'_, Msg> {
     .into()
 }
 
-fn account(app: &App) -> Element<'_, Msg> {
+pub fn account(app: &App) -> Element<'_, Msg> {
     let github = match &app.gh {
         Some(Gh::Ready(login)) => login.clone(),
         None => "Checking…".into(),
@@ -964,7 +591,7 @@ fn account(app: &App) -> Element<'_, Msg> {
             seg(
                 "Database".into(),
                 false,
-                Msg::Pop(Some(Pop::Settings(SetTab::Db))),
+                Msg::Area(Area::Settings(SetTab::Db)),
             ),
         ),
         Rooms::SignedOut | Rooms::Failed(_) => ("Not signed in", sign_in_button(app)),
@@ -1008,7 +635,7 @@ fn account(app: &App) -> Element<'_, Msg> {
     rows.push(notice_line(app)).into()
 }
 
-fn database(app: &App) -> Element<'_, Msg> {
+pub fn database(app: &App) -> Element<'_, Msg> {
     let ready = !app.form.db_url.trim().is_empty() && !app.form.db_key.trim().is_empty();
     column![
         h4("Database"),
@@ -1034,11 +661,160 @@ fn database(app: &App) -> Element<'_, Msg> {
         ]
         .spacing(8)
         .align_y(Alignment::Center),
+        cap(app.t(
+            "DB の用意のしかたは、README の「部屋」にあります(SQL を流す・GitHub のログインを有効にする)。",
+            "Setup steps are in the README under Rooms (run the SQL, enable GitHub sign-in)."
+        )),
         notice_line(app),
-        Space::new().height(6),
-        h4("About"),
-        cap(format!("AsIs {} · MIT · development, as is", env!("CARGO_PKG_VERSION"))),
     ]
     .spacing(14)
     .into()
+}
+
+pub fn claude(app: &App) -> Element<'_, Msg> {
+    let place = asis::skill::dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|| "~/.claude/skills/asis".into());
+    column![
+        h4("Claude"),
+        cap(app.t(
+            "issue は、そのまま Claude への指示になります。手順書を入れると、Claude が「#12 を始めて」で issue から作業を始め、PR を issue につなぎます。",
+            "An issue is the instruction for Claude. With the skill installed, Claude starts from an issue on “Start #12” and links its PRs to that issue."
+        )),
+        sect(
+            row![
+                label("Skill for Claude Code", &place),
+                if app.skill {
+                    Element::from(text("Installed").size(14).color(app.accent))
+                } else {
+                    row![
+                        text("Not installed").size(14).color(DIM),
+                        primary("Install", app.accent, Some(Msg::SkillInstall)),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center)
+                    .into()
+                },
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        ),
+        sect(
+            column![
+                h4(app.t("Claude が守ること", "What Claude follows")),
+                lines(vec![
+                    label(
+                        app.t("ブランチ名を issue の番号で始める", "Start the branch name with the issue number"),
+                        "12-short-name"
+                    ),
+                    label(
+                        app.t("PR の本文に issue を書く", "Write the issue in the PR body"),
+                        "Closes #12 / Refs #12"
+                    ),
+                ]),
+                cap(app.t(
+                    "repository に別の決まり(CLAUDE.md など)があれば、そちらが優先されます。",
+                    "If a repository has its own rules (CLAUDE.md etc.), those win."
+                )),
+            ]
+            .spacing(10)
+            .into()
+        ),
+        notice_line(app),
+    ]
+    .spacing(14)
+    .into()
+}
+
+pub fn local_work(app: &App) -> Element<'_, Msg> {
+    let mut roots: Vec<Element<'_, Msg>> = app
+        .roots
+        .iter()
+        .map(|root| {
+            row![
+                text(root.clone()).size(14).color(TEXT).width(Length::Fill),
+                tog(
+                    "Remove",
+                    false,
+                    app.accent,
+                    Some(Msg::DropRoot(root.clone()))
+                ),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        })
+        .collect();
+    if roots.is_empty() {
+        roots = vec![cap("None").into()];
+    }
+    let ready = !app.form.root.trim().is_empty();
+    let place = match asis::host::wsl() {
+        Some(distro) => format!("WSL · {distro}"),
+        None => "This machine".to_string(),
+    };
+    column![
+        h4("Local work"),
+        cap(app.t(
+            "この PC の worktree とターミナルを読み、PR になる前の作業をカードに重ねます。ほかの人の PC の作業は見えません。",
+            "Reads worktrees and terminals on this machine and shows work before it becomes a PR. Work on other machines is not visible."
+        )),
+        sect(
+            column![
+                h4("Folders"),
+                cap(app.t(
+                    "clone を探すフォルダ。直下にある clone と、その worktree を読みます。",
+                    "Folders searched for clones. Clones directly inside, and their worktrees, are read."
+                )),
+                lines(roots),
+                row![
+                    input("~/src", &app.form.root, Field::Root, ready.then_some(Msg::AddRoot)).width(320),
+                    seg_opt("Add", ready.then_some(Msg::AddRoot)),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(10)
+            .into()
+        ),
+        sect(
+            row![
+                label("Workspace", app.t("gh・git を動かす場所", "Where gh and git run")),
+                text(place).size(14).color(DIM),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        ),
+        notice_line(app),
+    ]
+    .spacing(14)
+    .into()
+}
+
+pub fn about(_: &App) -> Element<'_, Msg> {
+    column![
+        h4("About"),
+        sect(
+            row![
+                label("AsIs", "development, as is · MIT"),
+                text(env!("CARGO_PKG_VERSION")).size(14).color(DIM),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        ),
+    ]
+    .spacing(14)
+    .into()
+}
+
+/// 線の枠で囲んだ、ひとまとまり
+pub fn sect<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
+    container(body)
+        .padding([16, 18])
+        .width(Length::Fill)
+        .style(boxed(FRAME, Color::TRANSPARENT))
+        .into()
 }

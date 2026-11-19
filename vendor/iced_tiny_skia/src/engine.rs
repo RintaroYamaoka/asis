@@ -1021,31 +1021,31 @@ fn fill_straight_edges(
         }
 
         // An empty rectangle paints nothing, as an empty path does.
-        let Some(rect) = bounds
+        let Some(visible) = bounds
             .intersection(&clip_bounds)
             .filter(|visible| visible.width > 0.0 && visible.height > 0.0)
-            .and_then(|visible| {
-                tiny_skia::Rect::from_xywh(
-                    visible.x,
-                    visible.y,
-                    visible.width,
-                    visible.height,
-                )
-            })
         else {
             return;
         };
 
-        pixels.fill_rect(
-            rect,
-            &tiny_skia::Paint {
-                shader: tiny_skia::Shader::SolidColor(into_color(color)),
-                anti_alias: true,
-                ..tiny_skia::Paint::default()
-            },
-            tiny_skia::Transform::identity(),
-            None,
-        );
+        let paint = tiny_skia::Paint {
+            shader: tiny_skia::Shader::SolidColor(into_color(color)),
+            anti_alias: true,
+            ..tiny_skia::Paint::default()
+        };
+
+        for (x, width) in pixel_spans(visible.x, visible.width) {
+            for (y, height) in pixel_spans(visible.y, visible.height) {
+                if let Some(rect) = tiny_skia::Rect::from_xywh(x, y, width, height) {
+                    pixels.fill_rect(
+                        rect,
+                        &paint,
+                        tiny_skia::Transform::identity(),
+                        None,
+                    );
+                }
+            }
+        }
     };
 
     fill(physical_bounds, color);
@@ -1094,10 +1094,70 @@ fn fill_straight_edges(
     }
 }
 
+/// Splits a span that covers parts of exactly two neighbouring pixels, and no
+/// whole pixel between them, at the pixel boundary.
+///
+/// tiny-skia's anti-aliased rectangle fill hits a `debug_assert!(false)` for
+/// such a span (it finds no whole pixel to fill between the two partial ones),
+/// which aborts debug builds. A clipped sliver of a bordered quad is enough to
+/// produce one. Each half lies inside a single pixel, which tiny-skia handles.
+fn pixel_spans(start: f32, length: f32) -> Vec<(f32, f32)> {
+    let end = start + length;
+    let boundary = start.floor() + 1.0;
+
+    if start.fract() != 0.0 && end > boundary && end < boundary + 1.0 {
+        vec![(start, boundary - start), (boundary, end - boundary)]
+    } else {
+        vec![(start, length)]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{Border, Shadow};
+
+    #[test]
+    fn a_span_over_two_partial_pixels_is_split_at_the_boundary() {
+        // 10.5..11.5: half of pixel 10 and half of pixel 11, no whole pixel
+        assert_eq!(pixel_spans(10.5, 1.0), vec![(10.5, 0.5), (11.0, 0.5)]);
+        // whole pixels in between, aligned starts, and single-pixel slivers stay whole
+        assert_eq!(pixel_spans(10.5, 3.0), vec![(10.5, 3.0)]);
+        assert_eq!(pixel_spans(10.0, 1.5), vec![(10.0, 1.5)]);
+        assert_eq!(pixel_spans(10.25, 0.5), vec![(10.25, 0.5)]);
+        assert_eq!(pixel_spans(10.5, 0.5), vec![(10.5, 0.5)]);
+    }
+
+    #[test]
+    fn filling_a_sliver_over_two_partial_pixels_does_not_abort() {
+        let mut pixmap = tiny_skia::Pixmap::new(32, 32).expect("pixmap");
+        let quad = Quad {
+            bounds: Rectangle {
+                x: 10.5,
+                y: 10.5,
+                width: 1.0,
+                height: 1.0,
+            },
+            border: Border::default(),
+            shadow: Shadow::default(),
+            snap: false,
+        };
+        fill_straight_edges(
+            &quad,
+            Color::WHITE,
+            quad.bounds,
+            1.0,
+            &mut pixmap.as_mut(),
+            Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 32.0,
+                height: 32.0,
+            },
+        );
+        assert!(pixmap.pixels().iter().any(|p| p.alpha() > 0));
+    }
+
 
     fn covered(mask: &ClipMask) -> usize {
         mask.mask().data().iter().filter(|c| **c == 255).count()

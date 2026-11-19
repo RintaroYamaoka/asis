@@ -220,6 +220,19 @@ pub fn detail_of(app: &App) -> Option<Element<'_, Msg>> {
             for l in &r.local {
                 d = d.push(cap(format!("Local  {}  {}", l.branch, l.panes.join(" / "))));
             }
+            // issue は、そのまま AI への指示になる。Claude に渡す一言を写す
+            if r.kind == Kind::Task {
+                let word = if app.english {
+                    format!("Start #{}", r.number)
+                } else {
+                    format!("#{} を始めて", r.number)
+                };
+                d = d.push(row![primary(
+                    &format!("Copy “{word}” for Claude"),
+                    app.accent,
+                    Some(Msg::Copy(word))
+                )]);
+            }
             if !r.url.is_empty() {
                 d = d.push(seg(
                     format!(

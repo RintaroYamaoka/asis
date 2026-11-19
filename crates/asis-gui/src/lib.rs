@@ -6,6 +6,7 @@ mod arrange;
 mod board;
 mod chrome;
 mod detail;
+mod pages;
 mod panels;
 mod screen;
 mod style;
@@ -13,6 +14,7 @@ mod style;
 use arrange::*;
 use board::*;
 use detail::*;
+use pages::*;
 use screen::*;
 use style::*;
 
@@ -25,7 +27,7 @@ use iced::widget::{
     button, container, mouse_area, opaque, responsive, scrollable, stack, text, text_input, Space,
 };
 use iced::{Alignment, Border, Color, Element, Font, Length, Subscription, Task, Theme};
-use panels::{Pop, RoomTab, SetTab};
+use panels::*;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// 窓の出し方(`run` で 1 回 決まる)
@@ -45,6 +47,29 @@ const EVERY: Duration = Duration::from_secs(30);
 /// 行を指す鍵(repo・種類・番号・題)。読み直しても同じ行を選んだままにする
 type Key = (String, Kind, u64, String);
 
+/// 部屋の中の、いま居るページ。ページ 1 つに役目 1 つ
+#[derive(Clone, PartialEq)]
+enum Page {
+    /// repository のカードの一覧。部屋を開くと、最初に出る
+    Repos,
+    /// その repository のボード。ボードは repository 1 つにつき 1 つ
+    Repo(String),
+    /// その repository の設定(ボードの奥)
+    RepoSettings(String),
+    /// 人のカードの一覧
+    Members,
+    /// その人の Roles(GitHub の番号で指す)
+    Member(i64),
+    RoomSettings,
+}
+
+/// 左の欄に何を出しているか。部屋の中か、この PC の設定か
+#[derive(Clone, Copy, PartialEq)]
+enum Area {
+    Room,
+    Settings(SetTab),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Look {
     Board,
@@ -61,6 +86,7 @@ struct Form {
     color: String,
     db_url: String,
     db_key: String,
+    root: String,
 }
 
 #[derive(Clone, Copy)]
@@ -72,6 +98,7 @@ enum Field {
     Color,
     DbUrl,
     DbKey,
+    Root,
 }
 
 /// 部屋を変える操作。DB に送る
@@ -106,11 +133,15 @@ struct Write {
 struct App {
     loader: Arc<Mutex<Option<Loader>>>,
     sections: Arc<Vec<Section>>,
-    /// 開いている部屋。None は全部
+    /// 開いている部屋。部屋が 1 つでもあれば、いつもどれかを開いている
     room: Option<usize>,
-    repo: Option<String>,
-    filter: Filter,
+    area: Area,
+    page: Page,
     look: Look,
+    /// Claude Code の手順書が、仕事場に入っているか
+    skill: bool,
+    /// 手元の clone を探すフォルダ(設定)
+    roots: Vec<String>,
     selected: Option<Key>,
     /// 選んだ行の中の、PR 1 本。None なら issue そのもの
     pr: Option<u64>,
@@ -189,9 +220,14 @@ enum Msg {
     SaveDb,
     AskDelete,
     Room(Option<usize>),
-    Repo(Option<String>),
-    Filter(Filter),
+    Go(Page),
+    Area(Area),
     Look(Look),
+    /// 字をクリップボードに写す
+    Copy(String),
+    SkillInstall,
+    AddRoot,
+    DropRoot(String),
     Select(Key, Option<u64>),
     Close,
     Act(asis::act::Action),
@@ -314,9 +350,11 @@ fn boot() -> (App, Task<Msg>) {
         loader: loader.clone(),
         sections: Arc::new(Vec::new()),
         room: None,
-        repo: None,
-        filter: Filter::All,
+        area: Area::Room,
+        page: Page::Repos,
         look: Look::Board,
+        skill: asis::skill::installed(),
+        roots: local.roots.clone(),
         selected: None,
         pr: None,
         open: false,
@@ -361,46 +399,53 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     if let Some(id) = &app.want_room {
                         if let Some(i) = sections.iter().position(|s| s.room.as_ref() == Some(id)) {
                             app.room = Some(i);
-                            app.repo = None;
+                            app.page = Page::Repos;
                             app.want_room = None;
                         }
                     }
                     // いつも、どれか 1 つの部屋を開いている(開いていた部屋が無くなったら、最初の部屋)
                     if app.room.is_none() && !sections.is_empty() {
                         app.room = Some(0);
-                        app.repo = None;
+                        app.page = Page::Repos;
                     }
                     app.sections = sections;
                     app.rooms = rooms;
+                    // 作るとき用:そのページを出した状態で開く
+                    // (`ASIS_POP=repos|board|rset|members|member|room|look|account|claude|local|db|about|new`)
+                    #[cfg(debug_assertions)]
+                    if app.synced.is_none() {
+                        let first = views(app).first().map(|v| v.repo.clone());
+                        let who = panels::open_room(app)
+                            .and_then(|r| r.members.first())
+                            .map(|m| m.github_id);
+                        let set = |t| Area::Settings(t);
+                        match std::env::var("ASIS_POP").as_deref() {
+                            Ok("board") => app.page = first.map_or(Page::Repos, Page::Repo),
+                            Ok("rset") => app.page = first.map_or(Page::Repos, Page::RepoSettings),
+                            Ok("members") => app.page = Page::Members,
+                            Ok("member") => app.page = who.map_or(Page::Members, Page::Member),
+                            Ok("room") => app.page = Page::RoomSettings,
+                            Ok("look") => app.area = set(SetTab::Look),
+                            Ok("account") => app.area = set(SetTab::Account),
+                            Ok("claude") => app.area = set(SetTab::Claude),
+                            Ok("local") => app.area = set(SetTab::Local),
+                            Ok("db") => app.area = set(SetTab::Db),
+                            Ok("about") => app.area = set(SetTab::About),
+                            Ok("new") => app.pop = Some(Pop::NewRoom),
+                            _ => {}
+                        }
+                    }
                     // 作るとき用:最初の 1 件の中身を出した状態で開く(画面を撮って確かめるため)
                     #[cfg(debug_assertions)]
                     if app.synced.is_none() && std::env::var_os("ASIS_OPEN_FIRST").is_some() {
+                        if let Some(v) = views(app).first().map(|v| v.repo.clone()) {
+                            app.page = Page::Repo(v);
+                        }
                         step(app, 1);
                         app.open = app.selected.is_some();
                     }
-                    // 作るとき用:設定の画面を出した状態で開く(`ASIS_POP=look|account|db|members|repos|room|new`)
-                    #[cfg(debug_assertions)]
-                    if app.synced.is_none() {
-                        app.pop = match std::env::var("ASIS_POP").as_deref() {
-                            Ok("look") => Some(Pop::Settings(SetTab::Look)),
-                            Ok("account") => Some(Pop::Settings(SetTab::Account)),
-                            Ok("db") => Some(Pop::Settings(SetTab::Db)),
-                            Ok("members") => Some(Pop::Room(RoomTab::Members)),
-                            Ok("repos") => Some(Pop::Room(RoomTab::Repos)),
-                            Ok("room") => Some(Pop::Room(RoomTab::Room)),
-                            Ok("new") => Some(Pop::NewRoom),
-                            _ => None,
-                        };
-                    }
                     app.synced = Some(Instant::now());
                     app.error = None;
-                    // 開いていた部屋が無くなったら、部屋の設定も閉じる
-                    if app.room.is_none()
-                        && app.want_room.is_none()
-                        && matches!(app.pop, Some(Pop::Room(_)))
-                    {
-                        app.pop = None;
-                    }
                 }
                 Err(e) => app.error = Some(e),
             }
@@ -434,6 +479,7 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 Field::Color => &mut f.color,
                 Field::DbUrl => &mut f.db_url,
                 Field::DbKey => &mut f.db_key,
+                Field::Root => &mut f.root,
             } = value;
         }
         Msg::RoomOp(op) => {
@@ -455,7 +501,9 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 Ok(done) => {
                     if let Some(id) = done.strip_prefix("created:") {
                         app.want_room = Some(id.to_string());
-                        app.pop = Some(Pop::Room(RoomTab::Repos));
+                        app.pop = None;
+                        app.area = Area::Room;
+                        app.page = Page::Repos;
                         app.notice = Some((
                             app.t(
                                 "Room を作りました。repository を足してください",
@@ -467,6 +515,7 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                     } else if done == "gone" {
                         app.pop = None;
                         app.room = None;
+                        app.page = Page::Repos;
                         app.notice = None;
                     } else {
                         app.notice = (!done.is_empty()).then_some((done, true));
@@ -484,7 +533,8 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         }
         Msg::SignIn => {
             let Some(db) = asis::config::load().ok().and_then(|l| l.db) else {
-                app.pop = Some(Pop::Settings(SetTab::Db));
+                app.area = Area::Settings(SetTab::Db);
+                app.pop = None;
                 return Task::none();
             };
             if app.signing_in {
@@ -537,7 +587,7 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 // 読み直しを待たずに、その場で Sign out した画面(はじめの画面)にする
                 app.rooms = Rooms::SignedOut;
                 app.sections = Arc::new(Vec::new());
-                app.repo = None;
+                app.page = Page::Repos;
                 app.selected = None;
                 app.open = false;
                 app.pop = None;
@@ -619,13 +669,71 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         }
         Msg::Room(room) => {
             app.room = room;
-            app.repo = None;
+            app.area = Area::Room;
+            app.page = Page::Repos;
             app.selected = None;
             app.open = false;
+            app.notice = None;
+            app.confirm_delete = false;
         }
-        Msg::Repo(repo) => app.repo = repo,
-        Msg::Filter(f) => app.filter = f,
+        Msg::Go(page) => {
+            app.area = Area::Room;
+            app.page = page;
+            app.selected = None;
+            app.open = false;
+            app.notice = None;
+            app.confirm_delete = false;
+        }
+        Msg::Area(area) => {
+            app.area = area;
+            app.open = false;
+            app.write = None;
+            app.notice = None;
+            app.confirm_delete = false;
+            // 開いたときに、入っているかを確かめ直す(外で入れた・消したかもしれない)
+            if area == Area::Settings(SetTab::Claude) {
+                app.skill = asis::skill::installed();
+            }
+        }
         Msg::Look(look) => app.look = look,
+        Msg::Copy(text) => {
+            app.notice = Some((
+                if app.english {
+                    format!("Copied: {text}")
+                } else {
+                    format!("コピーしました: {text}")
+                },
+                true,
+            ));
+            return iced::clipboard::write(text);
+        }
+        Msg::SkillInstall => match asis::skill::install() {
+            Ok(dir) => {
+                app.skill = true;
+                app.notice = Some((
+                    if app.english {
+                        format!("Installed to {}", dir.display())
+                    } else {
+                        format!("{} に入れました", dir.display())
+                    },
+                    true,
+                ));
+            }
+            Err(e) => app.notice = Some((e, false)),
+        },
+        Msg::AddRoot => {
+            let root = app.form.root.trim().to_string();
+            if root.is_empty() || app.roots.contains(&root) {
+                return Task::none();
+            }
+            let mut roots = app.roots.clone();
+            roots.push(root);
+            return save_roots(app, roots);
+        }
+        Msg::DropRoot(root) => {
+            let roots = app.roots.iter().filter(|r| **r != root).cloned().collect();
+            return save_roots(app, roots);
+        }
         Msg::Select(key, pr) => {
             app.selected = Some(key);
             app.pr = pr;
@@ -679,10 +787,10 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
             let repos = repos_of(app);
             app.notice = None;
             app.write = Some(Write {
-                repo: app
-                    .repo
-                    .clone()
-                    .or_else(|| (repos.len() == 1).then(|| repos[0].clone())),
+                repo: match &app.page {
+                    Page::Repo(repo) => Some(repo.clone()),
+                    _ => (repos.len() == 1).then(|| repos[0].clone()),
+                },
                 ..Write::default()
             });
         }
@@ -736,8 +844,19 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 }
                 return Task::none();
             }
+            // ここから下は、ボードの上だけ(ほかのページでは、打った字を奪わない)
+            let Some(here) = board_repo(app) else {
+                return Task::none();
+            };
             match key.as_ref() {
-                KeyCode::Named(Named::Tab) => app.filter = app.filter.next(),
+                // 次の repository のボードへ
+                KeyCode::Named(Named::Tab) => {
+                    let all: Vec<String> = views(app).iter().map(|v| v.repo.clone()).collect();
+                    if let Some(at) = all.iter().position(|r| *r == here) {
+                        app.page = Page::Repo(all[(at + 1) % all.len()].clone());
+                        app.selected = None;
+                    }
+                }
                 // 中身を出していれば閉じる。出していなければ、選ぶのをやめる
                 KeyCode::Named(Named::Escape) => {
                     if app.open {
@@ -769,6 +888,23 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
         Msg::Key(_) => {}
     }
     Task::none()
+}
+
+/// 手元の clone を探すフォルダを、設定に書く
+fn save_roots(app: &mut App, roots: Vec<String>) -> Task<Msg> {
+    match asis::config::save(|t| asis::config::with_roots(t, &roots)) {
+        Ok(_) => {
+            app.roots = roots;
+            app.form.root.clear();
+            app.notice = None;
+            // 探す場所が変わったので、手元の作業を読み直す
+            update(app, Msg::Refresh)
+        }
+        Err(e) => {
+            app.notice = Some((e, false));
+            Task::none()
+        }
+    }
 }
 
 /// 部屋を変える操作を、DB に送る。作ったときは `created:<番号>`、自分が居なくなる操作は `gone` を返す

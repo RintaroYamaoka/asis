@@ -18,33 +18,57 @@ pub fn column_of(stage: Stage) -> usize {
 
 pub type Item<'a> = (&'a RepoView, &'a Row);
 
-/// 開いている部屋の、repo で絞ったあとの全部の行
-pub fn items(app: &App) -> Vec<Item<'_>> {
-    app.sections
+/// 開いている部屋
+pub fn section(app: &App) -> Option<&Section> {
+    app.room.and_then(|i| app.sections.get(i))
+}
+
+/// 開いている部屋の、読めた repository
+pub fn views(app: &App) -> Vec<&RepoView> {
+    section(app)
+        .map(|s| s.repos.iter().filter_map(|r| r.as_ref().ok()).collect())
+        .unwrap_or_default()
+}
+
+/// 1 つの repository の、出す行
+pub fn rows_of(view: &RepoView) -> Vec<Item<'_>> {
+    view.groups
         .iter()
-        .enumerate()
-        .filter(|(i, _)| app.room.is_none_or(|r| r == *i))
-        .flat_map(|(_, s)| s.repos.iter().filter_map(|r| r.as_ref().ok()))
-        .filter(|v| app.repo.as_ref().is_none_or(|r| *r == v.repo))
-        .flat_map(|v| {
-            v.groups
-                .iter()
-                .flat_map(move |g| g.rows.iter().map(move |r| (v, r)))
-        })
+        .flat_map(|g| g.rows.iter().map(move |r| (view, r)))
+        .filter(|(v, r)| r.shows(Filter::All, &v.viewer))
         .collect()
 }
 
-/// 絞り込みまで当てたもの
-pub fn shown(app: &App) -> Vec<Item<'_>> {
-    let mut out: Vec<Item<'_>> = items(app)
-        .into_iter()
-        .filter(|(v, r)| r.shows(app.filter, &v.viewer))
-        .collect();
-    // 自分の番は、待たせている時間の長い順(同じ列・同じ段の中で)
-    if app.filter == Filter::Mine {
-        out.sort_by_key(|(_, r)| std::cmp::Reverse(r.waiting));
+/// 開いている部屋の、全部の行(カードの数字・持っている件数を数える用。合わせたボードは作らない)
+pub fn room_items(app: &App) -> Vec<Item<'_>> {
+    views(app).into_iter().flat_map(rows_of).collect()
+}
+
+/// いまボードを出している repository。ボードのページでなければ None
+pub fn board_repo(app: &App) -> Option<String> {
+    match (&app.area, &app.page) {
+        (Area::Room, Page::Repo(repo)) if views(app).iter().any(|v| v.repo == *repo) => {
+            Some(repo.clone())
+        }
+        _ => None,
     }
-    out
+}
+
+/// いま出しているボードの行。ボードは repository 1 つにつき 1 つ
+pub fn items(app: &App) -> Vec<Item<'_>> {
+    let Some(repo) = board_repo(app) else {
+        return Vec::new();
+    };
+    views(app)
+        .into_iter()
+        .filter(|v| v.repo == repo)
+        .flat_map(rows_of)
+        .collect()
+}
+
+/// 絞り込みは置かない(自分の番は、カードの枠の色で分かる)
+pub fn shown(app: &App) -> Vec<Item<'_>> {
+    items(app)
 }
 
 /// issue の段。人の手が要る順(In review → Merged → In progress → Todo)
