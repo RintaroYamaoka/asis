@@ -18,6 +18,9 @@ pub struct RepoView {
     /// 読み方についての注記(本番の扱い・読み切れなかったこと)
     pub notes: Vec<String>,
     pub groups: Vec<Group>,
+    /// 終わったタスク(issue が閉じていて、終わっていない PR が無いもの)。
+    /// 今の状態を持たないので、`stage` は見ない(`why` は `Closed`)
+    pub closed: Vec<Row>,
 }
 
 pub struct Group {
@@ -26,7 +29,7 @@ pub struct Group {
 }
 
 /// 行が何か
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// GitHub の issue
     Task,
@@ -210,6 +213,8 @@ const ORDER: [TaskState; 5] = [
 /// 動きが無いと印を付ける長さ(3 日)
 const STALE: i64 = 3 * 86400;
 pub const LOOSE: &str = "Unlinked PRs";
+/// 終わったタスクの理由の欄
+pub const CLOSED: &str = "Closed";
 pub const LOCAL: &str = "Local work (no PR yet)";
 
 /// `only` が空でなければ、その人たちが出した PR と、その人たちのタスクだけを出す。
@@ -302,6 +307,7 @@ pub fn build(
         }
     }
 
+    let mut closed: Vec<Row> = Vec::new();
     let mut groups: Vec<Group> = ORDER
         .iter()
         .map(|s| Group {
@@ -326,12 +332,18 @@ pub fn build(
         if !related {
             continue;
         }
-        let Some(g) = ORDER.iter().position(|s| *s == t.state) else {
-            continue;
-        }; // 完了は出さない
-        idx.iter().for_each(|i| claimed[*i] = true);
+        // 完了は、今の一覧には出さず、終わったものの一覧に入れる。
+        // つながる PR は「入った」ことにしない(今までどおり、まだ出すものは下で出る)
+        let g = ORDER.iter().position(|s| *s == t.state);
+        if g.is_some() {
+            idx.iter().for_each(|i| claimed[*i] = true);
+        }
         let (age, waiting, stale) = clock(&idx);
-        groups[g].rows.push(Row {
+        let into = match g {
+            Some(g) => &mut groups[g].rows,
+            None => &mut closed,
+        };
+        into.push(Row {
             kind: Kind::Task,
             stage: Stage::of_task(t.state, &vs).unwrap_or(Stage::Todo),
             number: issue.number,
@@ -342,7 +354,9 @@ pub fn build(
             age,
             waiting,
             stale,
-            why: if t.mismatch {
+            why: if g.is_none() {
+                CLOSED.to_string()
+            } else if t.mismatch {
                 format!("{} · issue closed, PR still open", task_label(t.state))
             } else {
                 task_label(t.state).to_string()
@@ -377,13 +391,17 @@ pub fn build(
         if !idx.is_empty() && !idx.iter().any(|i| wanted_pr(&f.prs[*i])) {
             continue;
         }
-        let Some(g) = ORDER.iter().position(|s| *s == v.state) else {
-            continue;
-        };
-        idx.iter().for_each(|i| claimed[*i] = true);
+        let g = ORDER.iter().position(|s| *s == v.state);
+        if g.is_some() {
+            idx.iter().for_each(|i| claimed[*i] = true);
+        }
         let (age, waiting, stale) = clock(&idx);
         let file = t.path.rsplit('/').next().unwrap_or("");
-        groups[g].rows.push(Row {
+        let into = match g {
+            Some(g) => &mut groups[g].rows,
+            None => &mut closed,
+        };
+        into.push(Row {
             kind: Kind::Doc,
             stage: Stage::of_task(v.state, &vs).unwrap_or(Stage::Todo),
             number: 0,
@@ -399,6 +417,7 @@ pub fn build(
             waiting,
             stale,
             why: match v.state {
+                TaskState::Done => CLOSED.to_string(),
                 TaskState::ShippedOpen if file.is_empty() => "Deployed".to_string(),
                 TaskState::ShippedOpen => format!("Deployed · still open in {file}"),
                 TaskState::Doing if vs.is_empty() && !t.branches.is_empty() => {
@@ -490,6 +509,7 @@ pub fn build(
             .chain(f.notes.iter().map(|c| c.text()))
             .collect(),
         groups,
+        closed,
     }
 }
 
@@ -782,6 +802,18 @@ pub(crate) mod tests {
         assert!(row(21).prs[0].stale);
         // 時刻が分からなければ、最後に動いたときから数える
         assert_eq!(row(23).age, "5h");
+    }
+
+    #[test]
+    fn finished_tasks_are_kept_apart_from_the_open_ones() {
+        let v = sample();
+        // #9 は閉じていて、終わっていない PR が無い
+        assert_eq!(v.closed.len(), 1);
+        assert_eq!((v.closed[0].number, v.closed[0].why.as_str()), (9, CLOSED));
+        assert!(v.groups.iter().flat_map(|g| &g.rows).all(|r| r.number != 9));
+        // 出す人を絞っているときは、その人たちに関わるものだけ(#9 は ann が起票した)
+        assert!(sample_only(&["bob"]).closed.is_empty());
+        assert_eq!(sample_only(&["ann"]).closed.len(), 1);
     }
 
     #[test]
