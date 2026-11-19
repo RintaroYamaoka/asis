@@ -57,6 +57,20 @@ struct RawRoom {
 const ROOMS: &str = "/rest/v1/rooms?select=id,name,merge_by_author,deploy_by_author,ignore_checks,\
 room_repos(repo,everyone),room_members(github_id,login,is_admin,review,merge,deploy)&order=created_at";
 
+/// 部屋の名前として使える形にする(DB の決まりと同じ: 1〜80 字)
+pub fn room_name(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    match name.chars().count() {
+        0 => Err(lang::t("名前を書いてください", "Write a name").to_string()),
+        n if n > 80 => Err(lang::t(
+            "名前が長すぎます(80 字まで)",
+            "The name is too long (80 characters at most)",
+        )
+        .to_string()),
+        _ => Ok(name.to_string()),
+    }
+}
+
 /// いちばん新しい版を 1 行だけ聞く。新しさは、出した順(版の字の順ではない)
 fn release_query(app: &str) -> String {
     let app: String = app
@@ -669,6 +683,42 @@ impl Client {
     }
 
     /// 数えないチェックの名前を決める
+    /// 部屋そのものの欄を書き換える(管理者だけ)
+    fn set_room(&self, room: &str, body: &serde_json::Value) -> Result<(), String> {
+        self.changed(
+            "PATCH",
+            &format!("/rest/v1/rooms?id=eq.{room}"),
+            Some(&body.to_string()),
+            lang::t(
+                "変えられませんでした(管理者ではありません)",
+                "Could not change it (you are not an Admin)",
+            ),
+        )
+    }
+
+    /// 部屋の名前を変える。前後の空白は落とす。空の名前・長すぎる名前は、送る前に止める
+    pub fn rename(&self, room: &str, name: &str) -> Result<String, String> {
+        let name = room_name(name)?;
+        self.set_room(room, &serde_json::json!({ "name": name }))?;
+        Ok(name)
+    }
+
+    /// 取り込む人・本番に出す人を、役の人ではなく PR を出した本人にするか
+    pub fn set_by_author(&self, room: &str, role: Role, on: bool) -> Result<(), String> {
+        let column = match role {
+            Role::Merge => "merge_by_author",
+            Role::Deploy => "deploy_by_author",
+            _ => {
+                return Err(lang::t(
+                    "本人に任せられるのは、Merge と Deploy だけです",
+                    "Only Merge and Deploy can be left to the author",
+                )
+                .to_string())
+            }
+        };
+        self.set_room(room, &serde_json::json!({ column: on }))
+    }
+
     pub fn set_ignore(&self, room: &str, names: &[String]) -> Result<(), String> {
         let list: Vec<&str> = names
             .iter()
@@ -941,6 +991,7 @@ const HELP: &str = "asis room — 部屋(repo・メンバー・役割をまと�
   asis room invite <部屋> <名前> [役割]   GitHub のアカウント名で招く。入っている人なら役割を変える
                                           役割: --review --merge --deploy --admin
   asis room kick <部屋> <名前>            メンバーを外す
+  asis room rename <部屋> <新しい名前>    部屋の名前を変える
   asis room leave <部屋>                  自分が出る
   asis room ignore <部屋> <チェック,...>  数えないチェックの名前を決める(空にするなら \"\")
   asis room delete <部屋>                 部屋を消す
@@ -1084,6 +1135,9 @@ pub fn cli(args: &[String]) -> Result<(), String> {
                     c.kick(id, member.github_id)?;
                 }
                 ("leave", []) => c.leave(id)?,
+                ("rename", [new_name]) => {
+                    c.rename(id, new_name)?;
+                }
                 ("ignore", [names]) => {
                     let list: Vec<String> = names.split(',').map(str::to_string).collect();
                     c.set_ignore(id, &list)?;
@@ -1208,6 +1262,14 @@ mod tests {
         // 名前に条件を足す字が混ざっても、聞く相手は変わらない
         assert!(release_query("x&version=eq.9")
             .starts_with("/rest/v1/app_releases?app=eq.xversioneq9&"));
+    }
+
+    #[test]
+    fn a_room_name_is_trimmed_and_must_be_one_to_eighty_characters() {
+        assert_eq!(room_name("  shop  ").unwrap(), "shop");
+        assert_eq!(room_name(&"あ".repeat(80)).unwrap().chars().count(), 80);
+        assert!(room_name("   ").is_err());
+        assert!(room_name(&"あ".repeat(81)).is_err());
     }
 
     #[test]

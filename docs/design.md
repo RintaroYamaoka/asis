@@ -192,7 +192,7 @@ PR ごとに、次の表を上から順に当てて最初に当たった行で�
 |---|---|---|
 | Repositories | 何を読んでいるか。repository のカード(名前・自分の番の数・開いている数・注記の印)と、足すカード | 押すと、その repository のボード。ボードの上の Repository settings に、読んだときの注記・誰の分を出すか・外す |
 | Members | 誰が居て、どの役か。人のカード(役・持っている数)と、招くカード | 押すと、その人の Roles と Remove |
-| Room settings | 部屋そのもの。Name・Ignored checks・Leave・Delete(2 回押す) | — |
+| Room settings | 部屋そのもの。Name(変えられる)・Who merges / Who deploys(役の人か、PR を出した本人か)・Ignored checks・Leave・Delete(2 回押す) | — |
 
 **この PC の設定**(左端の下の Settings。前に出さず、ページにする)
 
