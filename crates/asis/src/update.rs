@@ -14,6 +14,10 @@ pub struct App {
     pub name: String,
     /// いま動いている版(`0.2.0`)
     pub version: String,
+    /// 自分でビルドして使っている人のための、作り直しのコマンド(プログラムと引数)。
+    /// これがあるときは、配っている実行ファイルには入れ替えない。新しい版が出たら、このコマンドで
+    /// ソースから作り直す(自分でビルドした版を、黙って別の実行ファイルにしないため)
+    pub rebuild: Option<Vec<String>>,
 }
 
 /// DB にある、いちばん新しい版
@@ -233,6 +237,36 @@ pub enum Outcome {
     Ready(String),
     /// いまの版はもう使えないのに、入れ替えられなかった(理由つき)
     Blocked(String),
+    /// 新しい版が出ている。ソースから作り直す(自分でビルドして使っている人)
+    Available(String),
+}
+
+/// 作り直しを、その版でもう頼んだか。頼んだ版を覚えておき、同じ版で何度も作り直さない
+/// (作り直しに失敗したとき、開くたびに繰り返さないため。もう一度やるのは、人が押したとき)
+const ASKED: &str = "asis.rebuild";
+
+pub fn rebuild_asked(dir: &Path, version: &str) -> bool {
+    std::fs::read_to_string(dir.join(ASKED)).is_ok_and(|t| t.trim() == version)
+}
+
+/// 作り直しのコマンドを起こす。待たない(作り直しは数分かかる。終わると、次に開いたとき新しい版で動く)
+pub fn rebuild(app: &App, dir: &Path, version: &str) -> Result<(), String> {
+    let Some([program, args @ ..]) = app.rebuild.as_deref() else {
+        return Err(say!(
+            "作り直しのコマンドがありません",
+            "There is no command to rebuild with"
+        ));
+    };
+    let _ = std::fs::write(dir.join(ASKED), version);
+    crate::log::line(&format!(
+        "update: {} {} -> {version}: rebuilding from source ({program})",
+        app.name, app.version
+    ));
+    std::process::Command::new(program)
+        .args(args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("{program}: {e}"))
 }
 
 /// 1 回 確かめて、新しければ入れ替える。Sign in していない・DB が無い・つながらないときは、何もしない。
@@ -254,6 +288,12 @@ pub fn run_once(app: &App, dir: &Path, db: &crate::config::Db) -> Outcome {
             return Outcome::Nothing;
         }
     };
+    if app.rebuild.is_some() {
+        return match decide(&app.version, &release) {
+            Verdict::Current => Outcome::Nothing,
+            Verdict::Newer | Verdict::TooOld => Outcome::Available(release.version),
+        };
+    }
     match plan(&app.version, staged_version(dir).as_deref(), &release) {
         Step::Nothing => Outcome::Nothing,
         Step::Ready(version) => Outcome::Ready(version),
@@ -289,6 +329,32 @@ pub fn run_once(app: &App, dir: &Path, db: &crate::config::Db) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rebuild_is_asked_once_per_version() {
+        let dir = folder("ask", &[]);
+        let app = App {
+            name: "my-app".into(),
+            version: "0.1.0".into(),
+            // 何もしないで終わるコマンド
+            rebuild: Some(vec![
+                std::env::current_exe().unwrap().display().to_string(),
+                "--list".into(),
+            ]),
+        };
+        assert!(!rebuild_asked(&dir, "0.2.0"));
+        rebuild(&app, &dir, "0.2.0").unwrap();
+        assert!(rebuild_asked(&dir, "0.2.0"));
+        // 次の版が出たら、また頼む
+        assert!(!rebuild_asked(&dir, "0.3.0"));
+        // コマンドが無ければ、頼めない
+        let none = App {
+            rebuild: None,
+            ..app.clone()
+        };
+        assert!(rebuild(&none, &dir, "0.3.0").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn the_next_step_follows_the_running_the_staged_and_the_released_version() {

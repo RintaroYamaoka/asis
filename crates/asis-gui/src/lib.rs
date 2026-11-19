@@ -288,6 +288,8 @@ enum Msg {
     Restart,
     /// 開いて最初に、新しい版を確かめた結果
     UpdateChecked(asis::update::Outcome),
+    /// 新しい版を、ソースから作り直す(人が押した)
+    Rebuild(String),
     Again(u64),
     Key(keyboard::Event),
 }
@@ -748,6 +750,17 @@ fn update(app: &mut App, msg: Msg) -> Task<Msg> {
                 app.notice = Some((e.to_string(), false));
             }
         },
+        Msg::Rebuild(version) => {
+            if let Err(e) = ask_rebuild(&version, true) {
+                app.notice = Some((e, false));
+            }
+        }
+        // 自分でビルドした版:新しい版が出ていたら、その版では 1 回だけ、聞かずに作り直しを始める
+        Msg::UpdateChecked(asis::update::Outcome::Available(version)) => {
+            if let Err(e) = ask_rebuild(&version, false) {
+                asis::log::line(&format!("rebuild: {e}"));
+            }
+        }
         Msg::UpdateChecked(outcome) => {
             // 開いた直後で、何も開いていない・書いていないときだけ、聞かずに開き直す
             let idle = !app.open && app.write.is_none() && app.pop.is_none() && !app.busy;
@@ -1137,7 +1150,29 @@ const UPDATE_EVERY: Duration = Duration::from_secs(6 * 3600);
 
 /// 動いている exe のフォルダで、新しい版を確かめ続ける。新しければ裏で入れ替える(次に開くと、その版で動く)。
 /// 開いたらすぐ 1 回 確かめる(新しい版があれば、開いた直後のうちに開き直せるように)
+/// 配っているもの(名前・今の版・作り直しのコマンド)。起こす側が渡したもの
+static UPDATE_APP: OnceLock<asis::update::App> = OnceLock::new();
+
+/// 動いている実行ファイルのフォルダ
+fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
+}
+
+/// ソースから作り直すのを頼む(自分でビルドして使っている人)。`again` は、人が押したとき
+fn ask_rebuild(version: &str, again: bool) -> Result<bool, String> {
+    let (Some(app), Some(dir)) = (UPDATE_APP.get(), exe_dir()) else {
+        return Ok(false);
+    };
+    if !again && asis::update::rebuild_asked(&dir, version) {
+        return Ok(false);
+    }
+    asis::update::rebuild(app, &dir, version).map(|()| true)
+}
+
 fn watch_updates(app: asis::update::App) {
+    let _ = UPDATE_APP.set(app.clone());
     let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
