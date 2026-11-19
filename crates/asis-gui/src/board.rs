@@ -57,9 +57,17 @@ pub fn pr_card<'a>(
     v: &'a RepoView,
     r: &'a Row,
     p: &'a asis::view::PrLine,
+    with_task: bool,
 ) -> Element<'a, Msg> {
     let key = key_of(v, r);
     let on = app.selected.as_ref() == Some(&key) && app.pr == Some(p.number);
+    // どのタスクの PR かを、カードの頭に出す(Board。List は、上の行がそれを言う)
+    let head = match (with_task, r.kind) {
+        (true, Kind::Task | Kind::Doc) => {
+            format!("{} · PR #{} · {}", label_of(r), p.number, p.author)
+        }
+        _ => format!("PR #{} · {}", p.number, p.author),
+    };
     let mine = p.turn.contains(&v.viewer);
     let line = if mine {
         app.accent
@@ -70,13 +78,10 @@ pub fn pr_card<'a>(
     };
     let body = column![
         row![
-            container(
-                cap(format!("{} #{} · {}", short(&v.repo), p.number, p.author))
-                    .wrapping(text::Wrapping::None)
-            )
-            .width(Length::Fill)
-            .height(16)
-            .clip(true),
+            container(cap(head).wrapping(text::Wrapping::None))
+                .width(Length::Fill)
+                .height(16)
+                .clip(true),
             age_of(&p.age, p.stale),
         ]
         .spacing(8),
@@ -251,7 +256,7 @@ fn lane<'a>(app: &'a App, v: &'a RepoView, r: &'a Row, col_w: f32) -> Element<'a
                 r.prs
                     .iter()
                     .filter(|p| pr_column(p.mark) == Some(i))
-                    .map(|p| pr_card(app, v, r, p))
+                    .map(|p| pr_card(app, v, r, p, false))
                     .collect(),
                 col_w,
             )
@@ -291,7 +296,7 @@ fn loose_lanes<'a>(app: &'a App, free: &[Item<'a>], col_w: f32) -> Element<'a, M
             cards(
                 free.iter()
                     .filter(|(_, r)| column_of(r.stage).checked_sub(1) == Some(i))
-                    .filter_map(|(v, r)| r.prs.first().map(|p| pr_card(app, v, r, p)))
+                    .filter_map(|(v, r)| r.prs.first().map(|p| pr_card(app, v, r, p, false)))
                     .collect(),
                 col_w,
             )
@@ -402,10 +407,7 @@ fn issue_row<'a>(app: &App, v: &'a RepoView, r: &'a Row, closed: bool) -> Elemen
 /// Board の左:issue の一覧。開いているものを全部(PR がまだ無いものも、進んでいるものも)。
 /// 終わったものは Closed に移る。見出しは、文書のタスクが 1 つでもあれば Plans
 fn issue_list<'a>(app: &'a App, tasks: &[Item<'a>], closed: &[Item<'a>]) -> Element<'a, Msg> {
-    let open: Vec<&Item<'a>> = tasks
-        .iter()
-        .filter(|(_, r)| r.kind != Kind::Local)
-        .collect();
+    let open: Vec<&Item<'a>> = tasks.iter().collect();
     let name = list_name(
         open.iter()
             .map(|(_, r)| r.kind)
@@ -485,9 +487,11 @@ fn issue_list<'a>(app: &'a App, tasks: &[Item<'a>], closed: &[Item<'a>]) -> Elem
     .into()
 }
 
-/// 真ん中:Board か List。中身は同じで、issue 1 件 = 1 行、PR が動いていればカード。
-/// - Board:左に issue の一覧(Open / Closed)、右に Pull requests(状態の列。PR のある issue の段を開いた形)
-/// - List:状態の束に 1 件 1 行(全部たたんだ形)。行の頭の「+」で、その場に段が開く
+/// 真ん中:Board か List。中身は同じ。
+/// - Board:左に issue の一覧(Open / Closed。PR がまだ無いものも、進んでいるものも、手元の作業も)、
+///   右に Pull requests。右は PR のカードだけを、状態の列に並べる(issue の行は、左にあるので出さない。
+///   どのタスクの PR かは、カードの頭に番号で出す)
+/// - List:状態の束に 1 件 1 行。行の頭の「+」で、その場に、その issue の PR のカードが開く
 ///
 /// 列は窓の幅いっぱいに 3 つ。カードの幅は 190〜260 のままで、列が広ければ横に並べる。
 pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
@@ -498,9 +502,49 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
     }
     let tasks = lanes(&all);
     let free = loose(&all);
-    let board = app.look == Look::Board;
-    let right_w = if board { width - LEFT_W - 1.0 } else { width };
-    let col_w = ((right_w - 6.0 - 22.0 - CHEV - 10.0 - 28.0) / 3.0)
+    if app.look == Look::Board {
+        let col_w = ((width - LEFT_W - 1.0 - 22.0 - 22.0 - 28.0) / 3.0)
+            .max(CARD_MIN)
+            .floor();
+        let total: usize = tasks
+            .iter()
+            .chain(free.iter())
+            .map(|(_, r)| r.prs.iter().filter(|p| pr_column(p.mark).is_some()).count())
+            .sum();
+        // タスクの順(人の手が要る順)に、その PR を並べる。つながっていない PR は、そのあと
+        let columns = cells(col_w, |i| {
+            let mut list: Vec<Element<'a, Msg>> = Vec::new();
+            for (v, r) in &tasks {
+                for p in r.prs.iter().filter(|p| pr_column(p.mark) == Some(i)) {
+                    list.push(pr_card(app, v, r, p, true));
+                }
+            }
+            for (v, r) in &free {
+                if column_of(r.stage).checked_sub(1) == Some(i) {
+                    if let Some(p) = r.prs.first() {
+                        list.push(pr_card(app, v, r, p, true));
+                    }
+                }
+            }
+            cards(list, col_w)
+        });
+        let side = iced::Padding {
+            top: 0.0,
+            right: 22.0,
+            bottom: 0.0,
+            left: 22.0,
+        };
+        let right = column![
+            container(heading("Pull requests", total)).padding(side.top(14.0)),
+            container(column_heads(&tasks, &free, col_w)).padding(side.top(12.0).bottom(8.0)),
+            scrollable(container(columns).padding(side.bottom(16.0)))
+                .width(Length::Fill)
+                .height(Length::Fill),
+        ];
+        return row![issue_list(app, &tasks, &done), vrule(), right].into();
+    }
+
+    let col_w = ((width - 6.0 - 22.0 - CHEV - 10.0 - 28.0) / 3.0)
         .max(CARD_MIN)
         .floor();
     let any_open = tasks.iter().any(|(v, r)| {
@@ -509,63 +553,34 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
             &key_of(v, r),
             r.prs.iter().any(|p| pr_column(p.mark).is_some()),
         )
-    }) || (!free.is_empty() && app.fold_loose.unwrap_or(board));
-
+    }) || (!free.is_empty() && app.fold_loose.unwrap_or(false));
     let mut body = column![].width(Length::Fill);
-    if board {
-        // 左の一覧にしか出さないもの = まだ何も動いていない issue(PR もブランチも無い)
-        for (v, r) in tasks.iter().filter(|(_, r)| column_of(r.stage) != 0) {
-            body = body.push(lane(app, v, r, col_w));
+    for i in LIST_ORDER {
+        let here: Vec<&Item<'a>> = tasks
+            .iter()
+            .filter(|(_, r)| column_of(r.stage) == i)
+            .collect();
+        if here.is_empty() {
+            continue;
         }
-    } else {
-        for i in LIST_ORDER {
-            let here: Vec<&Item<'a>> = tasks
-                .iter()
-                .filter(|(_, r)| column_of(r.stage) == i)
-                .collect();
-            if here.is_empty() {
-                continue;
-            }
-            body = body.push(container(heading(state_name(i), here.len())).padding(
-                iced::Padding {
-                    top: 14.0,
-                    right: 0.0,
-                    bottom: 6.0,
-                    left: CHEV + 10.0,
-                },
-            ));
-            for (v, r) in here {
-                body = body.push(lane(app, v, r, col_w));
-            }
+        body = body.push(
+            container(heading(state_name(i), here.len())).padding(iced::Padding {
+                top: 14.0,
+                right: 0.0,
+                bottom: 6.0,
+                left: CHEV + 10.0,
+            }),
+        );
+        for (v, r) in here {
+            body = body.push(lane(app, v, r, col_w));
         }
     }
     if !free.is_empty() {
         body = body.push(loose_lanes(app, &free, col_w));
     }
-    let pad = iced::Padding {
-        top: 0.0,
-        right: 22.0,
-        bottom: 16.0,
-        left: 6.0,
-    };
-    let mut right = column![];
-    if board {
-        let cards: usize = tasks
-            .iter()
-            .chain(free.iter())
-            .map(|(_, r)| r.prs.iter().filter(|p| pr_column(p.mark).is_some()).count())
-            .sum();
-        right = right.push(
-            container(heading("Pull requests", cards)).padding(iced::Padding {
-                top: 14.0,
-                right: 22.0,
-                bottom: 0.0,
-                left: 6.0 + CHEV + 10.0,
-            }),
-        );
-    }
+    let mut out = column![];
     if any_open {
-        right = right.push(
+        out = out.push(
             container(column_heads(&tasks, &free, col_w)).padding(iced::Padding {
                 top: 12.0,
                 right: 22.0,
@@ -574,16 +589,17 @@ pub fn middle<'a>(app: &'a App, width: f32) -> Element<'a, Msg> {
             }),
         );
     }
-    right = right.push(
-        scrollable(container(body).padding(pad))
-            .width(Length::Fill)
-            .height(Length::Fill),
-    );
-    if board {
-        row![issue_list(app, &tasks, &done), vrule(), right].into()
-    } else {
-        right.into()
-    }
+    out.push(
+        scrollable(container(body).padding(iced::Padding {
+            top: 0.0,
+            right: 22.0,
+            bottom: 16.0,
+            left: 6.0,
+        }))
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .into()
 }
 
 #[cfg(test)]
