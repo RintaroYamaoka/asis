@@ -16,10 +16,11 @@ const TILE_W: f32 = 240.0;
 const TILE_H: f32 = 104.0;
 const TILE_GAP: f32 = 12.0;
 
-/// ページの外枠。縦に長ければ、中だけが動く
-fn frame<'a>(body: Element<'a, Msg>) -> Element<'a, Msg> {
+/// ページの外枠。縦に長ければ、中だけが動く。
+/// カードの一覧は窓の幅いっぱいに使い(`wide`)、字のページは読みやすい幅で止める
+fn frame<'a>(body: Element<'a, Msg>, wide: bool) -> Element<'a, Msg> {
     scrollable(
-        container(container(body).max_width(PAGE_W))
+        container(container(body).max_width(if wide { f32::INFINITY } else { PAGE_W }))
             .padding([22, 26])
             .width(Length::Fill),
     )
@@ -115,26 +116,29 @@ fn grid<'a>(cards: Vec<Element<'a, Msg>>, width: f32) -> Element<'a, Msg> {
 
 /// 部屋のページ。`width` は、真ん中の幅
 pub fn room_page(app: &App, page: Page, width: f32) -> Element<'_, Msg> {
-    let inner = (width - 52.0).min(PAGE_W);
-    frame(match page {
-        Page::Repos | Page::Repo(_) => repos(app, inner),
-        Page::RepoSettings(repo) => repo_settings(app, repo),
-        Page::Members => members(app, inner),
-        Page::Member(id) => member(app, id),
-        Page::RoomSettings => room_settings(app),
-    })
+    let inner = (width - 52.0).max(TILE_W);
+    match page {
+        Page::Repos | Page::Repo(_) => frame(repos(app, inner), true),
+        Page::RepoSettings(repo) => frame(repo_settings(app, repo), false),
+        Page::Members => frame(members(app, inner), true),
+        Page::Member(id) => frame(member(app, id), false),
+        Page::RoomSettings => frame(room_settings(app), false),
+    }
 }
 
 /// この PC の設定のページ
 pub fn settings_page(app: &App, tab: SetTab) -> Element<'_, Msg> {
-    frame(match tab {
-        SetTab::Look => look(app),
-        SetTab::Account => account(app),
-        SetTab::Claude => claude(app),
-        SetTab::Local => local_work(app),
-        SetTab::Db => database(app),
-        SetTab::About => about(app),
-    })
+    frame(
+        match tab {
+            SetTab::Look => look(app),
+            SetTab::Account => account(app),
+            SetTab::Claude => claude(app),
+            SetTab::Local => local_work(app),
+            SetTab::Db => database(app),
+            SetTab::About => about(app),
+        },
+        false,
+    )
 }
 
 /// その repository で、開いているものの数と、自分の番の数
